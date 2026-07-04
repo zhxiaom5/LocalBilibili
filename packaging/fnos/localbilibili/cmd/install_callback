@@ -1,0 +1,47 @@
+#!/bin/bash
+set -uo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_ROOT="${TRIM_APPDEST:-$SCRIPT_ROOT/app}"
+VAR_DIR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+TMP_DIR="${TRIM_PKGTMP:-$APP_ROOT/tmp}"
+LOG_DIR="$VAR_DIR/logs"
+BIN="$APP_ROOT/localbilibili"
+MAIN="$SCRIPT_ROOT/cmd/main"
+if [ ! -x "$BIN" ] && [ -x "$APP_ROOT/app/localbilibili" ]; then
+  BIN="$APP_ROOT/app/localbilibili"
+fi
+SUBTITLE_CLI="$APP_ROOT/subtitle-cli"
+SUBTITLE_RUNTIME="$APP_ROOT/subtitle-runtime"
+if [ ! -x "$SUBTITLE_CLI" ] && [ -x "$APP_ROOT/app/subtitle-cli" ]; then
+  SUBTITLE_CLI="$APP_ROOT/app/subtitle-cli"
+  SUBTITLE_RUNTIME="$APP_ROOT/app/subtitle-runtime"
+fi
+
+write_status() {
+  echo "$1"
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    echo "$1" > "$TRIM_TEMP_LOGFILE"
+  fi
+}
+
+mkdir -p "$VAR_DIR" "$TMP_DIR" "$LOG_DIR" || {
+  write_status "failed to create LocalBilibili runtime directories"
+  exit 1
+}
+
+if [ ! -x "$BIN" ]; then
+  write_status "LocalBilibili binary not found or not executable: $BIN"
+  exit 1
+fi
+
+chmod +x "$MAIN" "$BIN" 2>/dev/null || true
+chmod +x "$SUBTITLE_CLI" "$SUBTITLE_RUNTIME/whisper-cli" "$SUBTITLE_RUNTIME/ffmpeg" 2>/dev/null || true
+
+"$MAIN" start >/dev/null 2>&1 || {
+  write_status "LocalBilibili installed but failed to start; check $TMP_DIR/localbilibili.log"
+  exit 1
+}
+
+write_status "LocalBilibili install callback completed"
+exit 0

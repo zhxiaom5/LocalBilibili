@@ -1,0 +1,94 @@
+#!/bin/bash
+set -euo pipefail
+
+APP_ROOT="${TRIM_APPDEST:-$(cd "$(dirname "$0")/.." && pwd)}"
+VAR_DIR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+TMP_DIR="${TRIM_PKGTMP:-$APP_ROOT/tmp}"
+PORT="${wizard_app_port:-${TRIM_SERVICE_PORT:-8080}}"
+PID_FILE="$TMP_DIR/localbilibili.pid"
+LOG_FILE="$TMP_DIR/localbilibili.log"
+ACCESS_LOG_DIR="$VAR_DIR/logs"
+BIN="$APP_ROOT/localbilibili"
+APP_BIN_DIR="$APP_ROOT"
+if [ ! -x "$BIN" ] && [ -x "$APP_ROOT/app/localbilibili" ]; then
+  BIN="$APP_ROOT/app/localbilibili"
+  APP_BIN_DIR="$APP_ROOT/app"
+fi
+
+write_error() {
+  local message="$1"
+  echo "$message" >&2
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    echo "$message" > "$TRIM_TEMP_LOGFILE"
+  fi
+}
+
+is_running() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  pgrep -f "$BIN" >/dev/null 2>&1
+}
+
+case "${1:-}" in
+  start)
+    mkdir -p "$VAR_DIR" "$TMP_DIR" "$ACCESS_LOG_DIR"
+    if is_running; then
+      exit 0
+    fi
+    if [ ! -x "$BIN" ]; then
+      write_error "LocalBilibili binary not found or not executable: $BIN"
+      exit 1
+    fi
+    cd "$APP_ROOT"
+    env \
+      LOCALBILIBILI_ADDR=":$PORT" \
+      LOCALBILIBILI_DB="$VAR_DIR/localbilibili.db" \
+      LOCALBILIBILI_CONFIG="$VAR_DIR/localbilibili.config.json" \
+      LOCALBILIBILI_LOG_DIR="$ACCESS_LOG_DIR" \
+      LOCALBILIBILI_YTDLP="$APP_BIN_DIR/yt-dlp" \
+      LOCALBILIBILI_SUBTITLE_CLI="$APP_BIN_DIR/subtitle-cli" \
+      SUBTITLE_WHISPER_CLI="$APP_BIN_DIR/subtitle-runtime/whisper-cli" \
+      SUBTITLE_FFMPEG="$APP_BIN_DIR/subtitle-runtime/ffmpeg" \
+      SUBTITLE_MODEL="$APP_BIN_DIR/subtitle-runtime/models/ggml-small.bin" \
+      LD_LIBRARY_PATH="$APP_BIN_DIR/subtitle-runtime:${LD_LIBRARY_PATH:-}" \
+      PATH="$APP_BIN_DIR:$APP_BIN_DIR/subtitle-runtime:${PATH:-}" \
+      "$BIN" >> "$LOG_FILE" 2>&1 &
+    echo "$!" > "$PID_FILE"
+    exit 0
+    ;;
+  stop)
+    if [ -f "$PID_FILE" ]; then
+      pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            break
+          fi
+          sleep 0.2
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      fi
+      rm -f "$PID_FILE"
+    fi
+    pkill -f "$BIN" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  status)
+    if is_running; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    write_error "Usage: $0 {start|stop|status}"
+    exit 1
+    ;;
+esac

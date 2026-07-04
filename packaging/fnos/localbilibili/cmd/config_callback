@@ -1,0 +1,19 @@
+#!/bin/bash
+set -uo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_ROOT="${TRIM_APPDEST:-$SCRIPT_ROOT/app}"
+MAIN="$SCRIPT_ROOT/cmd/main"
+
+# fnOS passes updated authorized paths through TRIM_DATA_ACCESSIBLE_PATHS.
+# A running process cannot observe changed environment variables, so restart
+# after every app settings save. Do not block saving settings if restart fails.
+"$MAIN" stop >/dev/null 2>&1 || true
+"$MAIN" start >/dev/null 2>&1 || {
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    echo "LocalBilibili restart failed after config save" > "$TRIM_TEMP_LOGFILE"
+  fi
+  exit 1
+}
+
+exit 0

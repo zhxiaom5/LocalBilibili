@@ -1,0 +1,13 @@
+{
+  ".url": {
+    "localbilibili.APPLICATION": {
+      "title": "LocalBilibili",
+      "icon": "images/icon-{0}.png",
+      "type": "url",
+      "protocol": "http",
+      "port": "${wizard_app_port}",
+      "url": "/",
+      "allUsers": true
+    }
+  }
+}

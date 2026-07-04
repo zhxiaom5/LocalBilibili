@@ -1,0 +1,5 @@
+LocalBilibili is provided for local personal media browsing.
+
+The application indexes local files only after the user grants and configures
+directories on the target system. It does not delete original media files when
+removing directory configuration.
