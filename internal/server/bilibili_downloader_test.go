@@ -141,6 +141,233 @@ printf cover > "$dir/media_001.jpg"
 	}
 }
 
+func TestBilibiliDownloaderYTDLPUsesVideoDetailTitle(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "yt-dlp")
+	script := `#!/bin/sh
+set -eu
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo 2026.01.01
+    exit 0
+  fi
+  if [ "$arg" = "--dump-single-json" ]; then
+    cat <<'JSON'
+{"id":"12345","title":"测试UP","uploader":"测试UP","uploader_id":"12345","webpage_url":"https://space.bilibili.com/12345","entries":[{"id":"BV1fallback","title":"BV1fallback","webpage_url":"https://www.bilibili.com/video/BV1fallback","duration":42,"timestamp":1782892800}]}
+JSON
+    exit 0
+  fi
+done
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$arg"
+    break
+  fi
+  prev="$arg"
+done
+dir=$(dirname "$out")
+mkdir -p "$dir"
+printf video > "$dir/media_001.mp4"
+printf '{"id":"BV1fallback","title":"完整 info 标题"}' > "$dir/media_001.info.json"
+printf cover > "$dir/media_001.jpg"
+`
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/web-interface/view" || r.URL.Query().Get("bvid") != "BV1fallback" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"bvid":    "BV1fallback",
+				"title":   "真实 B站标题",
+				"desc":    "真实简介",
+				"pubdate": int64(1782892800),
+			},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LOCALBILIBILI_YTDLP", tool)
+	outputDir := filepath.Join(t.TempDir(), "测试UP")
+	_, err := (BilibiliDownloader{VideoAPIBaseURL: server.URL}).UpdateCreator(context.Background(), DownloadTask{
+		Creator:    Creator{Name: "测试UP"},
+		ProfileURL: "https://space.bilibili.com/12345",
+		OutputDir:  outputDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "2026-07-01_真实 B站标题_BV1fallback", "media_001.mp4"), testMP4WithMoovAfterMdat(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, works, warnings, err := scanCreatorWithIdentityAndWarnings(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(works) != 1 {
+		t.Fatalf("works = %#v", works)
+	}
+	if works[0].Title != "真实 B站标题" || works[0].Description != "真实简介" || works[0].PublishedAt != "2026-07-01T08:00:00Z" {
+		t.Fatalf("work metadata = %#v", works[0])
+	}
+}
+
+func TestBilibiliDownloaderRepairsExistingBVIDTitleMetadata(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "yt-dlp")
+	script := `#!/bin/sh
+set -eu
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo 2026.01.01
+    exit 0
+  fi
+  if [ "$arg" = "--dump-single-json" ]; then
+    cat <<'JSON'
+{"id":"12345","title":"测试UP","uploader":"测试UP","uploader_id":"12345","webpage_url":"https://space.bilibili.com/12345","entries":[{"id":"BV1repair","title":"BV1repair","webpage_url":"https://www.bilibili.com/video/BV1repair","duration":42,"timestamp":1782892800}]}
+JSON
+    exit 0
+  fi
+done
+echo "download should not run" >&2
+exit 9
+`
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(t.TempDir(), "测试UP")
+	workDir := filepath.Join(outputDir, "2026-07-01_BV1repair_BV1repair")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "media_001.mp4"), testMP4WithMoovAfterMdat(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"work_type":"video_short","bvid":"BV1repair","title":"BV1repair","source_url":"https://www.bilibili.com/video/BV1repair","creator":{"mid":"12345","name":"测试UP","space_url":"https://space.bilibili.com/12345"},"media":[{"type":"video","file":"media_001.mp4"}]}`
+	if err := os.WriteFile(filepath.Join(workDir, "metadata.localbilibili.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/web-interface/view" || r.URL.Query().Get("bvid") != "BV1repair" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"bvid":    "BV1repair",
+				"title":   "修复后的标题",
+				"desc":    "修复后的简介",
+				"pubdate": int64(1782892800),
+			},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LOCALBILIBILI_YTDLP", tool)
+	result, err := (BilibiliDownloader{VideoAPIBaseURL: server.URL}).UpdateCreator(context.Background(), DownloadTask{
+		Creator:    Creator{Name: "测试UP"},
+		ProfileURL: "https://space.bilibili.com/12345",
+		OutputDir:  outputDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AddedWorks != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	_, works, warnings, err := scanCreatorWithIdentityAndWarnings(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(works) != 1 || works[0].Title != "修复后的标题" || works[0].Description != "修复后的简介" {
+		t.Fatalf("works = %#v", works)
+	}
+}
+
+func TestBilibiliDownloaderRepairsExistingMetadataWhenPlaylistBlocked(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "yt-dlp")
+	script := `#!/bin/sh
+set -eu
+for arg in "$@"; do
+  if [ "$arg" = "--version" ]; then
+    echo 2026.01.01
+    exit 0
+  fi
+  if [ "$arg" = "--dump-single-json" ]; then
+    echo "ERROR: [BilibiliSpaceVideo] 12345: Request is blocked by server (412)" >&2
+    exit 3
+  fi
+done
+echo "download should not run" >&2
+exit 9
+`
+	if err := os.WriteFile(tool, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(t.TempDir(), "测试UP")
+	workDir := filepath.Join(outputDir, "2026-07-01_BV1blocked_BV1blocked")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "media_001.mp4"), testMP4WithMoovAfterMdat(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"work_type":"video_short","bvid":"BV1blocked","title":"BV1blocked","source_url":"https://www.bilibili.com/video/BV1blocked","creator":{"mid":"12345","name":"测试UP","space_url":"https://space.bilibili.com/12345"},"media":[{"type":"video","file":"media_001.mp4"}]}`
+	if err := os.WriteFile(filepath.Join(workDir, "metadata.localbilibili.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/web-interface/view" || r.URL.Query().Get("bvid") != "BV1blocked" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"code": 0,
+			"data": map[string]any{
+				"bvid":    "BV1blocked",
+				"title":   "列表失败后的修复标题",
+				"desc":    "列表失败后的修复简介",
+				"pubdate": int64(1782892800),
+			},
+		})
+	}))
+	defer server.Close()
+	t.Setenv("LOCALBILIBILI_YTDLP", tool)
+	result, err := (BilibiliDownloader{VideoAPIBaseURL: server.URL}).UpdateCreator(context.Background(), DownloadTask{
+		Creator:    Creator{Name: "测试UP"},
+		ProfileURL: "https://space.bilibili.com/12345",
+		OutputDir:  outputDir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AddedWorks != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	_, works, warnings, err := scanCreatorWithIdentityAndWarnings(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(works) != 1 || works[0].Title != "列表失败后的修复标题" || works[0].Description != "列表失败后的修复简介" {
+		t.Fatalf("works = %#v", works)
+	}
+}
+
 func TestBilibiliDownloaderOpusWritesImageTextLayout(t *testing.T) {
 	var base string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

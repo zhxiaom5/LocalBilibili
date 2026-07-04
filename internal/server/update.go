@@ -577,7 +577,7 @@ func (m *UpdateManager) updateCreator(ctx context.Context, job UpdateJob) (int, 
 	if err != nil {
 		return 0, err
 	}
-	outputDir := filepath.Join(dir.Path, creator.Name)
+	outputDir := resolveCreatorOutputDir(dir.Path, creator)
 	if err := ensureWritableDirectory(outputDir); err != nil {
 		return 0, err
 	}
@@ -662,6 +662,33 @@ func maybePromoteCreatorNameAndDirectory(store *Store, creator Creator, rootDir,
 		return currentDir, creator.Name, err
 	}
 	return currentDir, updated.Name, nil
+}
+
+func resolveCreatorOutputDir(rootDir string, creator Creator) string {
+	name := strings.TrimSpace(creator.Name)
+	if name == "" {
+		name = "B站UP主"
+	}
+	primary := filepath.Join(rootDir, name)
+	if hasLocalBilibiliMetadata(primary) {
+		return primary
+	}
+	for _, candidate := range []string{creator.BilibiliUID, creator.BilibiliSecUID} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		path := filepath.Join(rootDir, candidate)
+		if path != primary && hasLocalBilibiliMetadata(path) {
+			return path
+		}
+	}
+	return primary
+}
+
+func hasLocalBilibiliMetadata(dir string) bool {
+	existing, err := existingLocalBilibiliMetadataPaths(dir)
+	return err == nil && len(existing) > 0
 }
 
 func promoteCreatorProfile(store *Store, creator Creator, profile CreatorProfile) (Creator, error) {

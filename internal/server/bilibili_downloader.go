@@ -23,8 +23,9 @@ import (
 const bilibiliRequestAttempts = 3
 
 type BilibiliDownloader struct {
-	BaseURL    string
-	HTTPClient *http.Client
+	BaseURL         string
+	VideoAPIBaseURL string
+	HTTPClient      *http.Client
 }
 
 type permanentMediaError struct {
@@ -76,6 +77,17 @@ type bilibiliCardResponse struct {
 			Face string `json:"face"`
 			Sign string `json:"sign"`
 		} `json:"card"`
+	} `json:"data"`
+}
+
+type bilibiliVideoViewResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		BVID    string `json:"bvid"`
+		Title   string `json:"title"`
+		Desc    string `json:"desc"`
+		Pubdate int64  `json:"pubdate"`
 	} `json:"data"`
 }
 
@@ -183,6 +195,14 @@ type ytdlpEntry struct {
 	Thumbnail   string  `json:"thumbnail"`
 	Uploader    string  `json:"uploader"`
 	UploaderID  string  `json:"uploader_id"`
+}
+
+type bilibiliVideoDetail struct {
+	BVID        string
+	Title       string
+	Description string
+	PublishedAt string
+	SourceURL   string
 }
 
 type localBilibiliDownloadMetadata struct {
@@ -478,6 +498,48 @@ func (d BilibiliDownloader) fetchSpaceCardProfile(ctx context.Context, profileUR
 	}, nil
 }
 
+func (d BilibiliDownloader) fetchBilibiliVideoDetail(ctx context.Context, bvid, cookie string) (bilibiliVideoDetail, error) {
+	bvid = strings.TrimSpace(bvid)
+	if bvid == "" {
+		return bilibiliVideoDetail{}, errors.New("缺少 bvid")
+	}
+	endpoint := "https://api.bilibili.com/x/web-interface/view"
+	if strings.TrimSpace(d.VideoAPIBaseURL) != "" {
+		endpoint = strings.TrimRight(d.VideoAPIBaseURL, "/") + "/x/web-interface/view"
+	} else if strings.TrimSpace(d.BaseURL) != "" {
+		endpoint = strings.TrimRight(d.BaseURL, "/") + "/x/web-interface/view"
+	}
+	values := url.Values{}
+	values.Set("bvid", bvid)
+	sourceURL := "https://www.bilibili.com/video/" + bvid
+	req, err := d.newRequest(ctx, endpoint+"?"+values.Encode(), cookie)
+	if err != nil {
+		return bilibiliVideoDetail{}, err
+	}
+	req.Header.Set("Referer", sourceURL)
+	var body bilibiliVideoViewResponse
+	if err := d.doJSON(req, &body); err != nil {
+		return bilibiliVideoDetail{}, err
+	}
+	if body.Code != 0 {
+		message := strings.TrimSpace(body.Message)
+		if message == "" {
+			message = "B站视频详情接口返回失败"
+		}
+		return bilibiliVideoDetail{}, errors.New(message)
+	}
+	detail := bilibiliVideoDetail{
+		BVID:        firstNonEmpty(body.Data.BVID, bvid),
+		Title:       strings.TrimSpace(body.Data.Title),
+		Description: strings.TrimSpace(body.Data.Desc),
+		SourceURL:   sourceURL,
+	}
+	if body.Data.Pubdate > 0 {
+		detail.PublishedAt = time.Unix(body.Data.Pubdate, 0).UTC().Format(time.RFC3339)
+	}
+	return detail, nil
+}
+
 func isNumericCreatorName(name, mid string) bool {
 	name = strings.TrimSpace(name)
 	mid = strings.TrimSpace(mid)
@@ -501,7 +563,7 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 	maxWorks := ytdlpMaxWorks()
 	playlist, err := d.fetchYTDLPPlaylist(ctx, profileURL, task.Cookie, maxWorks)
 	if err != nil {
-		return DownloadResult{}, err
+		return d.repairExistingMetadataAfterPlaylistFailure(ctx, task, err)
 	}
 	mid := firstNonEmpty(playlist.UploaderID, playlist.ChannelID, playlist.ID, extractBilibiliMID(profileURL))
 	creatorName := preferredCreatorName(firstNonEmpty(playlist.Uploader, playlist.Channel, playlist.Title, task.Creator.Name, mid))
@@ -520,7 +582,7 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 	}
 	reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), Message: "已获取B站作品列表", Directory: task.OutputDir, Notice: creatorBio})
 
-	existing, err := existingLocalBilibiliWorkIDs(task.OutputDir)
+	existing, err := existingLocalBilibiliMetadataPaths(task.OutputDir)
 	if err != nil {
 		return DownloadResult{}, err
 	}
@@ -536,7 +598,12 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "跳过缺少作品 ID 的条目", Directory: task.OutputDir})
 			continue
 		}
-		if existing[workID] {
+		if metadataPath := existing[workID]; metadataPath != "" {
+			if repaired, err := d.repairLocalBilibiliMetadata(ctx, metadataPath, task.Cookie); err == nil && repaired {
+				reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "已修复作品标题元数据", Directory: task.OutputDir})
+			} else if err != nil {
+				reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "作品标题元数据修复失败，保留现有信息", Directory: task.OutputDir, Notice: sanitizeYTDLPError(err.Error())})
+			}
 			processed++
 			skipped++
 			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "跳过已下载作品", Directory: task.OutputDir})
@@ -552,13 +619,50 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 			}
 			return DownloadResult{AddedWorks: added, CreatorName: creatorName}, err
 		}
-		existing[workID] = true
+		existing[workID] = "downloaded"
 		added++
 		processed++
 		downloadedMedia += mediaCount
 		reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "作品下载完成", Directory: task.OutputDir})
 	}
 	return DownloadResult{AddedWorks: added, CreatorName: creatorName}, nil
+}
+
+func (d BilibiliDownloader) repairExistingMetadataAfterPlaylistFailure(ctx context.Context, task DownloadTask, playlistErr error) (DownloadResult, error) {
+	existing, err := existingLocalBilibiliMetadataPaths(task.OutputDir)
+	if err != nil || len(existing) == 0 {
+		return DownloadResult{}, playlistErr
+	}
+	reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), Message: "B站列表获取失败，尝试修复本地作品元数据", Directory: task.OutputDir, Notice: sanitizeYTDLPError(playlistErr.Error())})
+	processed := 0
+	skipped := 0
+	repaired := 0
+	failed := 0
+	for _, metadataPath := range existing {
+		changed, repairErr := d.repairLocalBilibiliMetadata(ctx, metadataPath, task.Cookie)
+		processed++
+		if repairErr != nil {
+			failed++
+			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), ProcessedWorks: processed, SkippedWorks: skipped, Message: "作品标题元数据修复失败，保留现有信息", Directory: task.OutputDir, Notice: sanitizeYTDLPError(repairErr.Error())})
+			continue
+		}
+		if changed {
+			repaired++
+			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), ProcessedWorks: processed, SkippedWorks: skipped, Message: "已修复作品标题元数据", Directory: task.OutputDir})
+			continue
+		}
+		skipped++
+		reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), ProcessedWorks: processed, SkippedWorks: skipped, Message: "本地作品元数据无需修复", Directory: task.OutputDir})
+	}
+	notice := ""
+	if failed > 0 {
+		notice = fmt.Sprintf("列表获取失败后已尝试修复本地元数据：成功 %d，失败 %d", repaired, failed)
+	}
+	reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), ProcessedWorks: processed, SkippedWorks: skipped, Message: "本地作品元数据修复完成", Directory: task.OutputDir, Notice: notice})
+	if repaired == 0 && failed == len(existing) {
+		return DownloadResult{}, playlistErr
+	}
+	return DownloadResult{AddedWorks: 0, CreatorName: task.Creator.Name}, nil
 }
 
 func (d BilibiliDownloader) updateOpusWithHTML(ctx context.Context, task DownloadTask) (DownloadResult, error) {
@@ -791,18 +895,19 @@ func (d BilibiliDownloader) downloadYTDLPEntry(ctx context.Context, outputDir st
 	if workID == "" {
 		return 0, errors.New("作品缺少 bvid")
 	}
-	title := sanitizeFlatFilename(firstNonEmpty(entry.Title, workID), maxTitleBytesForAweme(workID))
-	if title == "" {
-		title = workID
-	}
-	date := ytdlpEntryDate(entry)
-	workDir := filepath.Join(outputDir, fmt.Sprintf("%s_%s_%s", date, title, workID))
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return 0, err
-	}
 	targetURL := firstNonEmpty(entry.WebpageURL, entry.URL)
 	if targetURL == "" {
 		targetURL = "https://www.bilibili.com/video/" + workID
+	}
+	detail, _ := d.fetchBilibiliVideoDetail(ctx, workID, cookie)
+	title := sanitizeFlatFilename(preferredVideoTitle(workID, detail.Title, "", entry.Title), maxTitleBytesForAweme(workID))
+	if title == "" {
+		title = workID
+	}
+	date := ytdlpEntryDateWithDetail(entry, detail)
+	workDir := filepath.Join(outputDir, fmt.Sprintf("%s_%s_%s", date, title, workID))
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return 0, err
 	}
 	args := []string{
 		"--no-playlist",
@@ -829,7 +934,9 @@ func (d BilibiliDownloader) downloadYTDLPEntry(ctx context.Context, outputDir st
 		return 0, err
 	}
 	sourceFile := filepath.Join(workDir, "source.ytdlp.json")
+	var infoEntry ytdlpEntry
 	if info := findFirstBySuffix(workDir, ".info.json"); info != "" {
+		infoEntry = readYTDLPInfoEntry(info)
 		_ = os.Rename(info, sourceFile)
 	}
 	coverFile := ""
@@ -840,10 +947,10 @@ func (d BilibiliDownloader) downloadYTDLPEntry(ctx context.Context, outputDir st
 	meta := localBilibiliDownloadMetadata{
 		WorkType:    classifyYTDLPWorkType(entry),
 		BVID:        workID,
-		Title:       firstNonEmpty(entry.Title, workID),
-		Description: strings.TrimSpace(entry.Description),
-		PublishedAt: ytdlpEntryPublishedAt(entry),
-		SourceURL:   targetURL,
+		Title:       preferredVideoTitle(workID, detail.Title, infoEntry.Title, entry.Title),
+		Description: firstNonEmpty(detail.Description, infoEntry.Description, entry.Description),
+		PublishedAt: firstNonEmpty(detail.PublishedAt, ytdlpEntryPublishedAt(infoEntry), ytdlpEntryPublishedAt(entry)),
+		SourceURL:   firstNonEmpty(detail.SourceURL, infoEntry.WebpageURL, targetURL),
 		CoverFile:   coverFile,
 		Creator:     creator,
 		Media:       []localBilibiliDownloadMediaMeta{{Type: "video", File: filepath.Base(mediaFile)}},
@@ -1503,6 +1610,45 @@ func ytdlpEntryID(entry ytdlpEntry) string {
 	return id
 }
 
+func readYTDLPInfoEntry(path string) ytdlpEntry {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ytdlpEntry{}
+	}
+	var entry ytdlpEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return ytdlpEntry{}
+	}
+	return entry
+}
+
+func preferredVideoTitle(bvid string, values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && !isBVIDFallbackTitle(value, bvid) {
+			return value
+		}
+	}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return strings.TrimSpace(bvid)
+}
+
+func isBVIDFallbackTitle(title, bvid string) bool {
+	title = strings.TrimSpace(title)
+	bvid = strings.TrimSpace(bvid)
+	if title == "" {
+		return true
+	}
+	if bvid != "" && title == bvid {
+		return true
+	}
+	return extractBVID(title) == title
+}
+
 func extractBVID(raw string) string {
 	re := regexp.MustCompile(`BV[0-9A-Za-z]+`)
 	if match := re.FindString(raw); match != "" {
@@ -1540,6 +1686,15 @@ func normalizeBilibiliSpaceURL(raw, mid string) string {
 		return strings.TrimSpace(raw)
 	}
 	return ""
+}
+
+func ytdlpEntryDateWithDetail(entry ytdlpEntry, detail bilibiliVideoDetail) string {
+	if detail.PublishedAt != "" {
+		if t, err := time.Parse(time.RFC3339, detail.PublishedAt); err == nil {
+			return t.Format("2006-01-02")
+		}
+	}
+	return ytdlpEntryDate(entry)
 }
 
 func ytdlpEntryDate(entry ytdlpEntry) string {
@@ -1627,10 +1782,62 @@ func findFirstBySuffix(dir, suffix string) string {
 	return ""
 }
 
-func existingLocalBilibiliWorkIDs(dir string) (map[string]bool, error) {
-	ids := map[string]bool{}
+func (d BilibiliDownloader) repairLocalBilibiliMetadata(ctx context.Context, metadataPath, cookie string) (bool, error) {
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return false, err
+	}
+	var meta localBilibiliDownloadMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return false, err
+	}
+	bvid := strings.TrimSpace(meta.BVID)
+	if bvid == "" || !isBVIDFallbackTitle(meta.Title, bvid) {
+		return false, nil
+	}
+	detail, err := d.fetchBilibiliVideoDetail(ctx, bvid, cookie)
+	if err != nil {
+		return false, err
+	}
+	changed := applyVideoDetailToMetadata(&meta, detail)
+	if !changed {
+		return false, nil
+	}
+	next, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(metadataPath, next, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func applyVideoDetailToMetadata(meta *localBilibiliDownloadMetadata, detail bilibiliVideoDetail) bool {
+	changed := false
+	if strings.TrimSpace(detail.Title) != "" && meta.Title != detail.Title {
+		meta.Title = detail.Title
+		changed = true
+	}
+	if strings.TrimSpace(detail.Description) != "" && meta.Description != detail.Description {
+		meta.Description = detail.Description
+		changed = true
+	}
+	if strings.TrimSpace(detail.PublishedAt) != "" && meta.PublishedAt != detail.PublishedAt {
+		meta.PublishedAt = detail.PublishedAt
+		changed = true
+	}
+	if strings.TrimSpace(detail.SourceURL) != "" && meta.SourceURL != detail.SourceURL {
+		meta.SourceURL = detail.SourceURL
+		changed = true
+	}
+	return changed
+}
+
+func existingLocalBilibiliMetadataPaths(dir string) (map[string]string, error) {
+	paths := map[string]string{}
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-		return ids, nil
+		return paths, nil
 	}
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -1646,12 +1853,24 @@ func existingLocalBilibiliWorkIDs(dir string) (map[string]bool, error) {
 		var meta localBilibiliDownloadMetadata
 		if err := json.Unmarshal(data, &meta); err == nil {
 			if id := firstNonEmpty(meta.BVID, meta.DynamicID); id != "" {
-				ids[id] = true
+				paths[id] = path
 			}
 		}
 		return nil
 	})
-	return ids, err
+	return paths, err
+}
+
+func existingLocalBilibiliWorkIDs(dir string) (map[string]bool, error) {
+	paths, err := existingLocalBilibiliMetadataPaths(dir)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool, len(paths))
+	for id := range paths {
+		ids[id] = true
+	}
+	return ids, nil
 }
 
 func isBilibiliOpusURL(raw string) bool {
