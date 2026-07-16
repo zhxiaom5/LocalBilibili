@@ -176,6 +176,10 @@ func NewUpdateManager(store *Store, hub *EventHub, downloader Downloader, concur
 		currentCancels: map[int64]context.CancelFunc{},
 		concurrency:    normalizeDownloaderConcurrency(firstConcurrency(concurrency)),
 	}
+	_, _ = store.FailInterruptedUpdateJobs("服务重启后更新任务已中断，请重新触发更新")
+	manager.mu.Lock()
+	manager.refreshJobsLocked()
+	manager.mu.Unlock()
 	go manager.scheduleLoop()
 	return manager
 }
@@ -205,11 +209,11 @@ func (m *UpdateManager) EnqueueImmediate(creatorIDs []int64, runID int64) (Updat
 	if err := m.ensureDownloaderReady(context.Background()); err != nil {
 		return UpdateStatus{}, err
 	}
-	prepared, err := m.prepareCreatorsForQueue(context.Background(), creatorIDs, 0, runID, 0, 1)
+	prepared, err := m.prepareCreatorsForQueue(context.Background(), creatorIDs, 0, runID, 0, 1, "manual")
 	if err != nil {
 		return UpdateStatus{}, err
 	}
-	jobs, err := m.store.AddUpdateJobs(prepared.ReadyCreatorIDs, 0, runID)
+	jobs, err := m.store.AddUpdateJobs(prepared.ReadyCreatorIDs, 0, runID, "manual")
 	if err != nil {
 		return UpdateStatus{}, err
 	}
@@ -240,7 +244,7 @@ func (m *UpdateManager) EnqueueImmediate(creatorIDs []int64, runID int64) (Updat
 	return status, nil
 }
 
-func (m *UpdateManager) EnqueueQueueNow(queueID int64) (UpdateRun, error) {
+func (m *UpdateManager) EnqueueQueueNow(queueID int64, triggerSource string) (UpdateRun, error) {
 	if err := m.ensureDownloaderReady(context.Background()); err != nil {
 		return UpdateRun{}, err
 	}
@@ -252,7 +256,8 @@ func (m *UpdateManager) EnqueueQueueNow(queueID int64) (UpdateRun, error) {
 	if err != nil {
 		return UpdateRun{}, err
 	}
-	run, err := m.store.CreateUpdateRun(queue, len(creators))
+	source := normalizeUpdateTriggerSource(triggerSource)
+	run, err := m.store.CreateUpdateRun(queue, len(creators), source)
 	if err != nil {
 		return UpdateRun{}, err
 	}
@@ -260,11 +265,11 @@ func (m *UpdateManager) EnqueueQueueNow(queueID int64) (UpdateRun, error) {
 	for _, creator := range creators {
 		ids = append(ids, creator.ID)
 	}
-	prepared, err := m.prepareCreatorsForQueue(context.Background(), ids, queueID, run.ID, 0, 1)
+	prepared, err := m.prepareCreatorsForQueue(context.Background(), ids, queueID, run.ID, 0, 1, source)
 	if err != nil {
 		return UpdateRun{}, err
 	}
-	jobs, err := m.store.AddUpdateJobs(prepared.ReadyCreatorIDs, queueID, run.ID)
+	jobs, err := m.store.AddUpdateJobs(prepared.ReadyCreatorIDs, queueID, run.ID, source)
 	if err != nil {
 		return UpdateRun{}, err
 	}
@@ -377,8 +382,12 @@ func (m *UpdateManager) ValidateCookie(ctx context.Context) error {
 	return m.store.MarkUpdateCookieValidation("valid", "Cookie 可用")
 }
 
-func (m *UpdateManager) prepareCreatorsForQueue(ctx context.Context, creatorIDs []int64, queueID, runID, retryOfJobID int64, attempt int) (updateQueuePreparation, error) {
+func (m *UpdateManager) prepareCreatorsForQueue(ctx context.Context, creatorIDs []int64, queueID, runID, retryOfJobID int64, attempt int, triggerSources ...string) (updateQueuePreparation, error) {
 	prepared := updateQueuePreparation{ReadyCreatorIDs: []int64{}, FailedJobs: []UpdateJob{}}
+	triggerSource := "manual"
+	if len(triggerSources) > 0 {
+		triggerSource = normalizeUpdateTriggerSource(triggerSources[0])
+	}
 	if len(creatorIDs) == 0 {
 		return prepared, nil
 	}
@@ -399,7 +408,7 @@ func (m *UpdateManager) prepareCreatorsForQueue(ctx context.Context, creatorIDs 
 			profileURL = "https://www.bilibili.com/user/" + strings.TrimSpace(creator.BilibiliSecUID)
 		}
 		fail := func(message string) error {
-			job, err := m.store.AddFailedUpdateJob(creator.ID, queueID, runID, retryOfJobID, attempt, message)
+			job, err := m.store.AddFailedUpdateJob(creator.ID, queueID, runID, retryOfJobID, attempt, message, triggerSource)
 			if err != nil {
 				return err
 			}
@@ -817,7 +826,7 @@ func (m *UpdateManager) enqueueDueQueues(now time.Time) {
 		if err != nil || next.After(now) {
 			continue
 		}
-		_, _ = m.EnqueueQueueNow(queue.ID)
+		_, _ = m.EnqueueQueueNow(queue.ID, "scheduled")
 		nextRun := NextCronRun(queue.Cron, now)
 		_, _ = m.store.UpdateUpdateQueue(queue.ID, "", queue.Cron, nil, nil)
 		if !nextRun.IsZero() {

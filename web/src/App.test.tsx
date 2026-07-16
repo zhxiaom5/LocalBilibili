@@ -301,6 +301,9 @@ beforeEach(() => {
               added_works: 0,
               error: "下载路径非常非常长导致失败",
               attempt: 1,
+              trigger_source: "manual",
+              started_at: "2026-07-10T01:00:00Z",
+              finished_at: "2026-07-10T01:02:00Z",
               created_at: "",
             },
             {
@@ -310,6 +313,9 @@ beforeEach(() => {
               status: "succeeded",
               added_works: 3,
               attempt: 1,
+              trigger_source: "scheduled",
+              started_at: "2026-07-10T03:00:00Z",
+              finished_at: "2026-07-10T03:05:00Z",
               created_at: "",
             },
           ],
@@ -317,6 +323,13 @@ beforeEach(() => {
           page_size: 10,
           total: 12,
           total_pages: 2,
+          summary: {
+            pending: 1,
+            running: 0,
+            succeeded: 5,
+            failed: 6,
+            added_works: 11,
+          },
         });
       if (url.includes("/api/update/immediate/reset"))
         return response({
@@ -502,7 +515,7 @@ it("keeps one realtime EventSource while navigating primary pages", async () => 
   expect(eventSourceURLs).toEqual(["/api/events"]);
 
   await user.click(screen.getByTitle("首页"));
-  expect(await screen.findByText("第一条")).toBeInTheDocument();
+  expect(await screen.findByText(/第一条/)).toBeInTheDocument();
   expect(eventSourceURLs).toEqual(["/api/events"]);
 
   await user.click(screen.getByTitle("关注"));
@@ -552,7 +565,18 @@ it("shows update management only to admins and exposes queue actions", async () 
   expect(screen.getByText("2.0 KB/s")).toBeInTheDocument();
   expect(screen.getAllByText("失败UP主").length).toBeGreaterThan(0);
   expect(screen.getAllByText("成功UP主").length).toBeGreaterThan(0);
+  expect(screen.getByText(/人工触发/)).toBeInTheDocument();
+  expect(screen.getAllByText(/定时更新/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/触发 .*结束/).length).toBeGreaterThan(0);
   expect(screen.getByText("第 1 / 2 页 · 共 12 条")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "按失败UP主过滤更新记录" }));
+  await waitFor(() =>
+    expect(
+      vi.mocked(fetch).mock.calls.some(([url]) =>
+        String(url).includes("status=failed"),
+      ),
+    ).toBe(true),
+  );
   expect(screen.getByText("Cookie 管理")).toBeInTheDocument();
   expect(
     screen.getByDisplayValue("msToken=one; ttwid=two"),

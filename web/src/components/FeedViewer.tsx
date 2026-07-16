@@ -16,14 +16,13 @@ import {
   Play,
   Repeat,
   Search,
-  SlidersHorizontal,
   Star,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { CSSProperties, FormEvent, MouseEvent, PointerEvent as ReactPointerEvent, TouchEvent as ReactTouchEvent } from 'react';
+import type { FormEvent, MouseEvent, PointerEvent as ReactPointerEvent, TouchEvent as ReactTouchEvent } from 'react';
 import type { ReactNode } from 'react';
 import type { Work } from '../lib/types';
 import { api } from '../lib/api';
@@ -39,9 +38,9 @@ type FeedViewerProps = {
   onCurrentWorkChange?: (workId: number) => void;
 };
 
-const OVERLAY_OPACITY_KEY = 'localbilibili.overlayOpacity';
 const AUTO_PLAY_NEXT_KEY = 'localbilibili.autoPlayNext';
 const BACKGROUND_AUDIO_KEY = 'localbilibili.backgroundAudio';
+const PLAYBACK_RATE_KEY = 'localbilibili.playbackRate';
 const GESTURE_IDLE_MS = 700;
 const TOUCH_SWIPE_THRESHOLD = 48;
 const WHEEL_SWIPE_THRESHOLD = 40;
@@ -99,22 +98,6 @@ type PictureInPictureVideo = HTMLVideoElement & {
   disablePictureInPicture?: boolean;
 };
 
-function readOverlayOpacity() {
-  try {
-    return window.localStorage?.getItem(OVERLAY_OPACITY_KEY) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function writeOverlayOpacity(value: number) {
-  try {
-    window.localStorage?.setItem(OVERLAY_OPACITY_KEY, String(value));
-  } catch {
-    // localStorage is optional in test and restricted browser contexts.
-  }
-}
-
 function readAutoPlayNext() {
   try {
     return window.localStorage?.getItem(AUTO_PLAY_NEXT_KEY) === 'true';
@@ -142,6 +125,23 @@ function readBackgroundAudio() {
 function writeBackgroundAudio(value: boolean) {
   try {
     window.localStorage?.setItem(BACKGROUND_AUDIO_KEY, String(value));
+  } catch {
+    // localStorage is optional in test and restricted browser contexts.
+  }
+}
+
+function readPlaybackRate() {
+  try {
+    const value = Number(window.localStorage?.getItem(PLAYBACK_RATE_KEY));
+    return Number.isFinite(value) && value >= 1 && value <= 2 ? value : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function writePlaybackRate(value: number) {
+  try {
+    window.localStorage?.setItem(PLAYBACK_RATE_KEY, String(value));
   } catch {
     // localStorage is optional in test and restricted browser contexts.
   }
@@ -197,20 +197,18 @@ export function FeedViewer({
   });
   const [mediaIndex, setMediaIndex] = useState(0);
   const [query, setQuery] = useState(search);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [overlayActive, setOverlayActive] = useState(false);
+  const [infoExpanded, setInfoExpanded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(true);
   const [muted, setMuted] = useState(true);
   const [volume, setVolume] = useState(0.7);
+  const [playbackRate, setPlaybackRate] = useState(readPlaybackRate);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPageFullscreen, setIsPageFullscreen] = useState(false);
   const [isNativeFullscreen, setIsNativeFullscreen] = useState(false);
   const [overlayPinnedHidden, setOverlayPinnedHidden] = useState(false);
-  const [overlayOpacity, setOverlayOpacity] = useState(() => {
-    const raw = readOverlayOpacity();
-    const parsed = raw ? Number(raw) : 0.38;
-    return Number.isFinite(parsed) ? Math.min(0.9, Math.max(0.12, parsed)) : 0.38;
-  });
   const [favoriteMenu, setFavoriteMenu] = useState<'work' | 'creator' | null>(null);
   const [hasWebkitVideoFullscreen, setHasWebkitVideoFullscreen] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
@@ -300,10 +298,6 @@ export function FeedViewer({
   }, [renderedWorkIndex, works]);
 
   useEffect(() => {
-    writeOverlayOpacity(overlayOpacity);
-  }, [overlayOpacity]);
-
-  useEffect(() => {
     writeAutoPlayNext(autoPlayNext);
   }, [autoPlayNext]);
 
@@ -322,6 +316,7 @@ export function FeedViewer({
       return Math.max(0, Math.min(works.length - 1, current));
     });
     setMediaIndex(0);
+    setInfoExpanded(false);
     previousWorksRef.current = works;
   }, [initialWorkId, works]);
 
@@ -573,6 +568,11 @@ export function FeedViewer({
       recordVideoDiagnostic('video_play_error', video, 'video.play() rejected');
     }
   }, [media?.id, media?.type, recordVideoDiagnostic, work?.id]);
+
+  const syncVideoDuration = useCallback((video: HTMLVideoElement | null = videoRef.current) => {
+    const nextDuration = video?.duration;
+    setDuration(typeof nextDuration === 'number' && Number.isFinite(nextDuration) && nextDuration > 0 ? nextDuration : 0);
+  }, []);
 
   const handleMediaClick = (event: MouseEvent<HTMLButtonElement>, delta: number) => {
     event.preventDefault();
@@ -857,13 +857,16 @@ export function FeedViewer({
     if (!video || !isVideo) return;
     video.volume = volume;
     video.muted = muted;
+    video.playbackRate = playbackRate;
     setCurrentTime(0);
-    setDuration(0);
     if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+      syncVideoDuration(video);
       setMediaReady(true);
       void attemptAutoplayVideo();
+      return;
     }
-  }, [attemptAutoplayVideo, isVideo, media?.id]);
+    setDuration(0);
+  }, [attemptAutoplayVideo, isVideo, media?.id, syncVideoDuration]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -876,6 +879,12 @@ export function FeedViewer({
     if (!video) return;
     video.muted = muted;
   }, [muted]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = playbackRate;
+  }, [playbackRate]);
 
   useEffect(() => {
     if (!isVideo) return;
@@ -980,6 +989,12 @@ export function FeedViewer({
     }
   };
 
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    if (videoRef.current) videoRef.current.muted = next;
+  };
+
   const togglePictureInPicture = async () => {
     activateOverlay();
     const video = videoRef.current as PictureInPictureVideo | null;
@@ -1077,7 +1092,6 @@ export function FeedViewer({
     return clearMediaSession;
   }, [backgroundAudio, clearMediaSession, isPlaying, isVideo, media, moveWork, pauseCurrentVideo, playCurrentVideo, seek, work]);
 
-  const viewerStyle = { '--overlay-alpha': String(overlayOpacity) } as CSSProperties;
   const workDefaultFolderID = workFolders.find((folder) => folder.is_default)?.id;
   const creatorDefaultFolderID = creatorFolders.find((folder) => folder.is_default)?.id;
   const isWorkFavorite = workFavoriteFolderIDs.length > 0;
@@ -1087,8 +1101,10 @@ export function FeedViewer({
     return <div className="empty-state">还没有作品。先去设置里保存目录并扫描。</div>;
   }
 
-  const topWorkDate = formatDate(work.published_at) || formatDate(work.created_at ?? '') || '日期未知';
-  const topWorkTitle = work.title?.trim() || '本地作品';
+  const workDate = formatDate(work.published_at) || formatDate(work.created_at ?? '') || '日期未知';
+  const workTitle = work.title?.trim() || '本地作品';
+  const bottomSummary = [workDate, workTitle].filter(Boolean).join(' · ');
+  const hasExpandableInfo = Boolean(work.linked_creators?.length);
 
   const toggleWorkFavorite = async (folderID = workDefaultFolderID) => {
     if (!enableFavorites || !folderID) return;
@@ -1126,12 +1142,19 @@ export function FeedViewer({
     <div
       ref={viewerRef}
       className={`feed-viewer immersive ${overlayActive ? 'overlay-active' : ''} ${isPageFullscreen ? 'page-fullscreen' : ''} ${overlayPinnedHidden ? 'overlay-pinned-hidden' : ''} ${isVideo && !isPlaying ? 'video-paused' : ''}`}
-      style={viewerStyle}
       tabIndex={0}
       onFocus={activateOverlay}
       onMouseMove={activateOverlay}
     >
-      <section className="stage immersive-stage" aria-label="作品播放器">
+      <section
+        className="stage immersive-stage"
+        aria-label="作品播放器"
+        onClick={(event) => {
+          if (!isVideo || isInteractiveWheelTarget(event.target)) return;
+          togglePlay();
+          activateOverlay();
+        }}
+      >
         {media.type === 'video' && (
           <video
             key={media.id}
@@ -1143,14 +1166,16 @@ export function FeedViewer({
             loop={!autoPlayNext}
             playsInline
             onLoadedMetadata={(event) => {
+              event.currentTarget.playbackRate = playbackRate;
               metadataLoadedMediaIDRef.current = media.id;
-              setDuration(event.currentTarget.duration || 0);
+              syncVideoDuration(event.currentTarget);
               setMediaReady(true);
               recordVideoDiagnostic('video_loadedmetadata', event.currentTarget);
               if (autoplayTargetMediaIDRef.current === media.id) {
                 void attemptAutoplayVideo();
               }
             }}
+            onDurationChange={(event) => syncVideoDuration(event.currentTarget)}
             onCanPlay={(event) => {
               setMediaReady(true);
               recordVideoDiagnostic('video_canplay', event.currentTarget);
@@ -1209,62 +1234,32 @@ export function FeedViewer({
         {media.type === 'audio' && <audio src={media.url} controls autoPlay />}
         {!mediaReady && media.type !== 'audio' && <div className="media-loading">加载中</div>}
         {mediaError && <div className="media-loading media-error">{mediaError}</div>}
+        {isVideo && !isPlaying && !mediaError && (
+          <div className="center-pause-indicator" aria-label="当前已暂停">
+            <Pause size={46} fill="currentColor" strokeWidth={2.4} />
+          </div>
+        )}
       </section>
 
       <div className="player-overlay">
         {!overlayPinnedHidden && (
           <>
-            <form className="feed-search" onSubmit={submitSearch}>
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索本地作品" aria-label="搜索本地作品" />
-              <button type="submit" title="搜索">
-                <Search size={20} />
-                <span>搜索</span>
-              </button>
-            </form>
-
-            <header className="top-meta">
-              <div className="top-meta-primary">
-                <Link to={`/creator/${work.creator_id}`} className="top-creator-link" aria-label={`@${work.creator_name}`}>
-                  <CreatorAvatarMini src={work.creator_avatar_url} name={work.creator_name} />
-                  <span>@{work.creator_name}</span>
-                </Link>
-                <div className="top-work-meta" aria-label="作品信息">
-                  {topWorkDate && (
-                    <>
-                      <span className="top-work-date">{topWorkDate}</span>
-                      <span className="top-meta-separator" aria-hidden="true">
-                        ·
-                      </span>
-                    </>
-                  )}
-                  <span className="top-work-title" title={topWorkTitle}>
-                    {topWorkTitle}
-                  </span>
-                  {work.source_url && (
-                    <>
-                      <span className="top-meta-separator" aria-hidden="true">
-                        ·
-                      </span>
-                      <a className="top-source-link" href={work.source_url} target="_blank" rel="noreferrer">
-                        原链接
-                      </a>
-                    </>
-                  )}
-                </div>
-              </div>
-              {work.linked_creators && work.linked_creators.length > 0 && (
-                <div className="top-meta-linked">
-                  <small>关联创作者</small>
-                  <div className="top-meta-linked-list">
-                    {work.linked_creators.map((item) => (
-                      <Link key={item.id} to={`/creator/${item.id}`} className="linked-creator-chip">
-                        @{item.name}
-                      </Link>
-                    ))}
-                  </div>
-                </div>
+            <div className={`feed-top-actions ${searchOpen ? 'search-open' : ''}`}>
+              {!searchOpen && (
+                <button className="feed-search-toggle" type="button" title="搜索" aria-label="打开搜索" onClick={() => setSearchOpen(true)}>
+                  <Search size={28} />
+                </button>
               )}
-            </header>
+              {searchOpen && (
+                <form className="feed-search" onSubmit={submitSearch}>
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索本地作品" aria-label="搜索本地作品" autoFocus />
+                  <button type="submit" title="搜索">
+                    <Search size={20} />
+                    <span>搜索</span>
+                  </button>
+                </form>
+              )}
+            </div>
 
             <aside className="action-rail" aria-label="作品操作">
               <FavoriteRailButton
@@ -1281,6 +1276,12 @@ export function FeedViewer({
                 title={isCreatorFavorite ? '取消收藏该作者' : '收藏该作者'}
                 onClick={() => setFavoriteMenu(favoriteMenu === 'creator' ? null : 'creator')}
               />
+              {isVideo && (
+                <button className="rail-button" type="button" title={muted ? '取消静音' : '静音'} aria-label={muted ? '取消静音' : '静音'} onClick={toggleMute}>
+                  {muted ? <VolumeX size={28} /> : <Volume2 size={28} />}
+                  <span>{muted ? '静音' : '有声'}</span>
+                </button>
+              )}
               {favoriteMenu === 'work' && (
                 <FavoriteFolderMenu
                   folders={workFolders}
@@ -1323,36 +1324,70 @@ export function FeedViewer({
               </div>
             )}
 
+            {isVideo && <VideoTimeline currentTime={currentTime} duration={duration} onSeek={seek} />}
+
             <footer className="bottom-meta">
+              <section className={`creator-info-panel ${infoExpanded ? 'expanded' : ''}`} aria-label="作品作者信息">
+                <Link to={`/creator/${work.creator_id}`} className="bottom-creator-link" aria-label={`@${work.creator_name}`}>
+                  <CreatorAvatarMini src={work.creator_avatar_url} name={work.creator_name} />
+                  <span>@{work.creator_name}</span>
+                </Link>
+                <p className="bottom-summary">
+                  <span>{bottomSummary}</span>
+                  {work.source_url && (
+                    <>
+                      <span aria-hidden="true"> · </span>
+                      <a className="bottom-source-link" href={work.source_url} target="_blank" rel="noreferrer">
+                        原链接
+                      </a>
+                    </>
+                  )}
+                </p>
+                {hasExpandableInfo && (
+                  <button className="feed-info-expand" type="button" onClick={() => setInfoExpanded((current) => !current)}>
+                    {infoExpanded ? '收起' : '展开'}
+                  </button>
+                )}
+                {infoExpanded && work.linked_creators && work.linked_creators.length > 0 && (
+                  <div className="bottom-meta-linked">
+                    <small>关联创作者</small>
+                    <div className="bottom-meta-linked-list">
+                      {work.linked_creators.map((item) => (
+                        <Link key={item.id} to={`/creator/${item.id}`} className="linked-creator-chip">
+                          @{item.name}
+                        </Link>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
               {isVideo && (
                 <VideoControls
-                  isPlaying={isPlaying}
                   autoPlayNext={autoPlayNext}
                   backgroundAudio={backgroundAudio}
                   isPictureInPicture={isPictureInPicture}
                   order={order}
                   muted={muted}
                   volume={volume}
+                  playbackRate={playbackRate}
                   currentTime={currentTime}
                   duration={duration}
-                  onTogglePlay={togglePlay}
                   onToggleAutoPlayNext={toggleAutoPlayNext}
                   onToggleBackgroundAudio={toggleBackgroundAudio}
                   onTogglePictureInPicture={() => void togglePictureInPicture()}
                   onToggleOrder={toggleFeedOrder}
-                  onSeek={seek}
                   onVolume={(next) => {
                     setVolume(next);
                     setMuted(next === 0);
                     if (videoRef.current) videoRef.current.volume = next;
                   }}
-                  onToggleMute={() => {
-                    const next = !muted;
-                    setMuted(next);
-                    if (videoRef.current) videoRef.current.muted = next;
+                  onPlaybackRate={(next) => {
+                    setPlaybackRate(next);
+                    writePlaybackRate(next);
+                    if (videoRef.current) videoRef.current.playbackRate = next;
                   }}
+                  onToggleMute={toggleMute}
                   overlayToggle={<OverlayToggle hidden={overlayPinnedHidden} onToggle={toggleFloatingOverlay} />}
-                  opacityControl={<OpacityControl value={overlayOpacity} onChange={setOverlayOpacity} />}
                   closeKey={`${work.id}:${media.id}`}
                   fullscreenControls={
                     <FullscreenControls
@@ -1367,7 +1402,6 @@ export function FeedViewer({
               )}
               {!isVideo && (
                 <div className="image-control-cluster">
-                  <OpacityControl value={overlayOpacity} onChange={setOverlayOpacity} compact />
                   <OverlayToggle hidden={overlayPinnedHidden} onToggle={toggleFloatingOverlay} />
                   <FullscreenControls
                     isPageFullscreen={isPageFullscreen}
@@ -1390,7 +1424,7 @@ export function FeedViewer({
 
 function isInteractiveWheelTarget(target: EventTarget) {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('button, input, textarea, select, .feed-range-input, .media-controls, .video-controls, .advanced-control-panel, .favorite-folder-menu, .feed-search, .opacity-control, .overlay-toggle'));
+  return Boolean(target.closest('button, input, textarea, select, a, .feed-range-input, .media-controls, .video-controls, .advanced-control-panel, .favorite-folder-menu, .feed-search, .feed-top-actions, .creator-info-panel, .overlay-toggle'));
 }
 
 function isTouchLikePointer(event: PointerEvent) {
@@ -1546,52 +1580,48 @@ function FavoriteFolderMenu({
 }
 
 function VideoControls({
-  isPlaying,
   autoPlayNext,
   backgroundAudio,
   isPictureInPicture,
   order,
   muted,
   volume,
+  playbackRate,
   currentTime,
   duration,
-  onTogglePlay,
   onToggleAutoPlayNext,
   onToggleBackgroundAudio,
   onTogglePictureInPicture,
   onToggleOrder,
-  onSeek,
   onVolume,
+  onPlaybackRate,
   onToggleMute,
   overlayToggle,
-  opacityControl,
   closeKey,
   fullscreenControls,
 }: {
-  isPlaying: boolean;
   autoPlayNext: boolean;
   backgroundAudio: boolean;
   isPictureInPicture: boolean;
   order: FeedOrder;
   muted: boolean;
   volume: number;
+  playbackRate: number;
   currentTime: number;
   duration: number;
-  onTogglePlay: () => void;
   onToggleAutoPlayNext: () => void;
   onToggleBackgroundAudio: () => void;
   onTogglePictureInPicture: () => void;
   onToggleOrder: () => void;
-  onSeek: (value: number) => void;
   onVolume: (value: number) => void;
+  onPlaybackRate: (value: number) => void;
   onToggleMute: () => void;
   overlayToggle: ReactNode;
-  opacityControl: ReactNode;
   closeKey: string;
   fullscreenControls: ReactNode;
 }) {
-  const timelineDrag = useRangeDrag(onSeek);
   const volumeDrag = useRangeDrag(onVolume);
+  const playbackRateDrag = useRangeDrag(onPlaybackRate);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const controlsRef = useRef<HTMLDivElement | null>(null);
 
@@ -1618,6 +1648,121 @@ function VideoControls({
 
   return (
     <div ref={controlsRef} className={`video-controls ${advancedOpen ? 'mobile-controls-expanded' : ''}`} aria-label="视频控制">
+      <div className="control-row">
+        <span className="timecode timeline-time-badge">
+          {formatTime(currentTime)} / {formatTime(duration)}
+        </span>
+        <button
+          className={`icon-button more-controls-button ${advancedOpen ? 'active-toggle' : ''}`}
+          type="button"
+          title="更多播放控制"
+          aria-label="更多播放控制"
+          aria-expanded={advancedOpen}
+          onClick={() => setAdvancedOpen((open) => !open)}
+        >
+          <MoreHorizontal size={22} />
+        </button>
+        {advancedOpen && (
+          <div className="advanced-control-panel" aria-label="高级播放控制">
+            <label className="volume-control" title="音量">
+              <button className="icon-button" type="button" onClick={onToggleMute} title={muted ? '取消静音' : '静音'} aria-label={muted ? '取消静音' : '静音'}>
+                {muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
+              </button>
+              <input
+                className="feed-range-input"
+                aria-label="音量"
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={muted ? 0 : volume}
+                {...volumeDrag}
+                onChange={(event) => onVolume(Number(event.currentTarget.value))}
+              />
+            </label>
+            <section className="advanced-panel-section" aria-label="播放设置">
+              <span className="advanced-panel-heading">播放</span>
+              <label className="playback-rate-control" title="播放速度">
+                <span>速度 <output aria-live="off">{playbackRate.toFixed(1)}x</output></span>
+                <input
+                  className="feed-range-input"
+                  aria-label="播放速度"
+                  type="range"
+                  min={1}
+                  max={2}
+                  step={0.1}
+                  value={playbackRate}
+                  {...playbackRateDrag}
+                  onChange={(event) => onPlaybackRate(Number(event.currentTarget.value))}
+                />
+              </label>
+              <div className="advanced-action-grid">
+                <button
+                  className={`icon-button mode-icon-button ${autoPlayNext ? 'active-toggle' : ''}`}
+                  type="button"
+                  onClick={onToggleAutoPlayNext}
+                  title={autoPlayNext ? '关闭自动连播，改为单作品循环' : '开启自动连播'}
+                  aria-label="自动连播"
+                >
+                  <Repeat size={18} />
+                  <span>{autoPlayNext ? '自动连播' : '单作品循环'}</span>
+                </button>
+                <button
+                  className="icon-button mode-icon-button"
+                  type="button"
+                  onClick={onToggleOrder}
+                  title={`播放顺序：${feedOrderLabel(order)}`}
+                  aria-label="播放顺序"
+                >
+                  <ArrowDownUp size={18} />
+                  <span>{feedOrderLabel(order)}</span>
+                </button>
+              </div>
+            </section>
+            <section className="advanced-panel-section" aria-label="画面设置">
+              <span className="advanced-panel-heading">画面</span>
+              <div className="advanced-action-grid">
+                <button
+                  className={`icon-button mode-icon-button ${backgroundAudio ? 'active-toggle' : ''}`}
+                  type="button"
+                  onClick={onToggleBackgroundAudio}
+                  title={backgroundAudio ? '关闭手机后台播放' : '开启手机后台播放'}
+                  aria-label="后台播放"
+                >
+                  <Headphones size={18} />
+                  <span>{backgroundAudio ? '后台播放' : '普通播放'}</span>
+                </button>
+                {overlayToggle}
+              </div>
+            </section>
+            <section className="advanced-panel-section advanced-panel-section-compact" aria-label="窗口设置">
+              <span className="advanced-panel-heading">窗口</span>
+              <div className="advanced-window-actions">
+                <button
+                  className={`icon-button mode-icon-button ${isPictureInPicture ? 'active-toggle' : ''}`}
+                  type="button"
+                  onClick={onTogglePictureInPicture}
+                  title={isPictureInPicture ? '退出画中画' : '画中画'}
+                  aria-label={isPictureInPicture ? '退出画中画' : '画中画'}
+                >
+                  <PictureInPicture2 size={18} />
+                  <span>{isPictureInPicture ? '画中画中' : '画中画'}</span>
+                </button>
+                {fullscreenControls}
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VideoTimeline({ currentTime, duration, onSeek }: { currentTime: number; duration: number; onSeek: (value: number) => void }) {
+  const timelineDrag = useRangeDrag(onSeek);
+
+  return (
+    <div className="full-video-timeline" aria-label="视频底部进度条">
       <input
         className="timeline feed-range-input"
         aria-label="视频进度"
@@ -1629,83 +1774,6 @@ function VideoControls({
         {...timelineDrag}
         onChange={(event) => onSeek(Number(event.currentTarget.value))}
       />
-      <div className="control-row">
-        <button className="icon-button" onClick={onTogglePlay} title={isPlaying ? '暂停' : '播放'}>
-          {isPlaying ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}
-        </button>
-        <span className="timecode">
-          {formatTime(currentTime)} / {formatTime(duration)}
-        </span>
-        <button className="icon-button" onClick={onToggleMute} title={muted ? '取消静音' : '静音'}>
-          {muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
-        </button>
-        <input
-          className="feed-range-input"
-          aria-label="音量"
-          type="range"
-          min={0}
-          max={1}
-          step={0.05}
-          value={muted ? 0 : volume}
-          {...volumeDrag}
-          onChange={(event) => onVolume(Number(event.currentTarget.value))}
-        />
-        <button
-          className={`icon-button more-controls-button ${advancedOpen ? 'active-toggle' : ''}`}
-          type="button"
-          title="更多播放控制"
-          aria-label="更多播放控制"
-          aria-expanded={advancedOpen}
-          onClick={() => setAdvancedOpen((open) => !open)}
-        >
-          <MoreHorizontal size={22} />
-        </button>
-        <div className="advanced-control-panel" aria-label="高级播放控制">
-          <button
-            className={`icon-button mode-icon-button ${autoPlayNext ? 'active-toggle' : ''}`}
-            type="button"
-            onClick={onToggleAutoPlayNext}
-            title={autoPlayNext ? '关闭自动连播，改为单作品循环' : '开启自动连播'}
-            aria-label="自动连播"
-          >
-            <Repeat size={18} />
-            <span>{autoPlayNext ? '自动连播' : '单作品循环'}</span>
-          </button>
-          <button
-            className={`icon-button mode-icon-button ${backgroundAudio ? 'active-toggle' : ''}`}
-            type="button"
-            onClick={onToggleBackgroundAudio}
-            title={backgroundAudio ? '关闭手机后台播放' : '开启手机后台播放'}
-            aria-label="后台播放"
-          >
-            <Headphones size={18} />
-            <span>{backgroundAudio ? '后台播放' : '普通播放'}</span>
-          </button>
-          <button
-            className={`icon-button mode-icon-button ${isPictureInPicture ? 'active-toggle' : ''}`}
-            type="button"
-            onClick={onTogglePictureInPicture}
-            title={isPictureInPicture ? '退出画中画' : '画中画'}
-            aria-label={isPictureInPicture ? '退出画中画' : '画中画'}
-          >
-            <PictureInPicture2 size={18} />
-            <span>{isPictureInPicture ? '画中画中' : '画中画'}</span>
-          </button>
-          <button
-            className="icon-button mode-icon-button"
-            type="button"
-            onClick={onToggleOrder}
-            title={`播放顺序：${feedOrderLabel(order)}`}
-            aria-label="播放顺序"
-          >
-            <ArrowDownUp size={18} />
-            <span>{feedOrderLabel(order)}</span>
-          </button>
-          {opacityControl}
-          {overlayToggle}
-          {fullscreenControls}
-        </div>
-      </div>
     </div>
   );
 }
@@ -1727,27 +1795,6 @@ function MinimalTimeline({ currentTime, duration, onSeek }: { currentTime: numbe
         onChange={(event) => onSeek(Number(event.currentTarget.value))}
       />
     </div>
-  );
-}
-
-function OpacityControl({ value, onChange, compact = false }: { value: number; onChange: (value: number) => void; compact?: boolean }) {
-  const opacityDrag = useRangeDrag(onChange);
-
-  return (
-    <label className={`opacity-control ${compact ? 'compact' : ''}`} title="悬浮透明度">
-      <SlidersHorizontal size={18} />
-      <input
-        className="feed-range-input"
-        aria-label="悬浮透明度"
-        type="range"
-        min={0.12}
-        max={0.9}
-        step={0.02}
-        value={value}
-        {...opacityDrag}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
-      />
-    </label>
   );
 }
 
@@ -1790,9 +1837,9 @@ function CreatorAvatarMini({ src, name }: { src?: string; name: string }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
   if (src && !failed) {
-    return <img className="top-creator-avatar" src={src} alt="" aria-hidden="true" onError={() => setFailed(true)} />;
+    return <img className="creator-avatar-mini" src={src} alt="" aria-hidden="true" referrerPolicy="no-referrer" onError={() => setFailed(true)} />;
   }
-  return <span className="top-creator-avatar fallback" aria-hidden="true">{name.slice(0, 1) || '@'}</span>;
+  return <span className="creator-avatar-mini fallback" aria-hidden="true">{name.slice(0, 1) || '@'}</span>;
 }
 
 function formatTime(value: number) {

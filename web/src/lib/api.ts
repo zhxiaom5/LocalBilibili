@@ -189,7 +189,7 @@ export const api = {
       method: "POST",
     }),
   updateStatus: () => request<{ status: UpdateStatus }>("/api/update/status"),
-  updateJobs: (params: { page?: number; pageSize?: number } = {}) =>
+  updateJobs: (params: { page?: number; pageSize?: number; status?: string } = {}) =>
     request<UpdateJobsPage>(`/api/update/jobs?${logQuery(params).toString()}`),
   deleteUpdateJob: (id: number) =>
     request<{ ok: boolean }>(`/api/update/jobs/${id}`, { method: "DELETE" }),
@@ -420,9 +420,10 @@ export const api = {
     ),
 };
 
-function logQuery(params: { page?: number; pageSize?: number }) {
+function logQuery(params: { page?: number; pageSize?: number; status?: string }) {
   const query = new URLSearchParams();
   query.set("page", String(params.page ?? 1));
   query.set("page_size", String(params.pageSize ?? 20));
+  if (params.status) query.set("status", params.status);
   return query;
 }

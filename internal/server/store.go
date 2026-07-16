@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +174,9 @@ CREATE TABLE IF NOT EXISTS update_runs (
   queue_id INTEGER NOT NULL,
   queue_name TEXT NOT NULL,
   enqueued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT NOT NULL DEFAULT '',
+  finished_at TEXT NOT NULL DEFAULT '',
+  trigger_source TEXT NOT NULL DEFAULT 'manual',
   total_creators INTEGER NOT NULL DEFAULT 0,
   succeeded_creators INTEGER NOT NULL DEFAULT 0,
   failed_creators INTEGER NOT NULL DEFAULT 0,
@@ -189,6 +193,7 @@ CREATE TABLE IF NOT EXISTS update_jobs (
   retry_of_job_id INTEGER NOT NULL DEFAULT 0,
   attempt INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'pending',
+  trigger_source TEXT NOT NULL DEFAULT 'manual',
   added_works INTEGER NOT NULL DEFAULT 0,
   total_works INTEGER NOT NULL DEFAULT 0,
   processed_works INTEGER NOT NULL DEFAULT 0,
@@ -390,6 +395,7 @@ WHERE NOT EXISTS (SELECT 1 FROM subtitle_queues);
 		name string
 		def  string
 	}{
+		{"trigger_source", "TEXT NOT NULL DEFAULT 'manual'"},
 		{"retry_of_job_id", "INTEGER NOT NULL DEFAULT 0"},
 		{"attempt", "INTEGER NOT NULL DEFAULT 1"},
 		{"total_works", "INTEGER NOT NULL DEFAULT 0"},
@@ -402,6 +408,18 @@ WHERE NOT EXISTS (SELECT 1 FROM subtitle_queues);
 		{"download_notice", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumnIfMissing("update_jobs", column.name, column.def); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name string
+		def  string
+	}{
+		{"started_at", "TEXT NOT NULL DEFAULT ''"},
+		{"finished_at", "TEXT NOT NULL DEFAULT ''"},
+		{"trigger_source", "TEXT NOT NULL DEFAULT 'manual'"},
+	} {
+		if err := s.addColumnIfMissing("update_runs", column.name, column.def); err != nil {
 			return err
 		}
 	}
@@ -937,6 +955,11 @@ func (s *Store) CreatorByBulkImportIdentity(directoryID int64, name string, secU
 		} else if ok && isLikelyPlaceholderCreator(existing) {
 			return existing, true, nil
 		}
+		if existing, ok, similarErr := s.correctableCreatorByBulkImportName(directoryID, name); similarErr != nil {
+			return Creator{}, false, similarErr
+		} else if ok {
+			return existing, true, nil
+		}
 		return Creator{}, false, nil
 	}
 	if err != nil {
@@ -947,6 +970,45 @@ func (s *Store) CreatorByBulkImportIdentity(directoryID int64, name string, secU
 		return Creator{}, false, err
 	}
 	return creator, true, nil
+}
+
+func (s *Store) correctableCreatorByBulkImportName(directoryID int64, name string) (Creator, bool, error) {
+	name = preferredCreatorName(name)
+	comparable := comparableCreatorName(name)
+	if comparable == "" {
+		return Creator{}, false, nil
+	}
+	rows, err := s.db.Query(`SELECT id, directory_id, name, work_count, bilibili_uid, bilibili_sec_uid, bilibili_profile_url, online_identity_status, avatar_url, avatar_file, bio, profile_updated_at
+FROM creators
+WHERE directory_id=? AND work_count=0 AND name<>?
+ORDER BY id`, directoryID, name)
+	if err != nil {
+		return Creator{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var creator Creator
+		if err := rows.Scan(
+			&creator.ID,
+			&creator.DirectoryID,
+			&creator.Name,
+			&creator.WorkCount,
+			&creator.BilibiliUID,
+			&creator.BilibiliSecUID,
+			&creator.BilibiliProfileURL,
+			&creator.OnlineIdentityStatus,
+			&creator.AvatarURL,
+			&creator.AvatarFile,
+			&creator.Bio,
+			&creator.ProfileUpdatedAt,
+		); err != nil {
+			return Creator{}, false, err
+		}
+		if comparableCreatorName(creator.Name) == comparable {
+			return creator, true, nil
+		}
+	}
+	return Creator{}, false, rows.Err()
 }
 
 func (s *Store) ImportCreatorPlaceholder(directoryID int64, profileURL string) (Creator, error) {
@@ -1026,14 +1088,14 @@ func (s *Store) ImportResolvedCreatorProfiles(directoryID int64, profiles []Crea
 		if existing, ok, err := s.CreatorByBulkImportIdentity(directoryID, name, secUID, profileURL); err != nil {
 			return nil, err
 		} else if ok {
-			if err := s.UpdateCreatorOnlineProfile(existing.ID, identity); err != nil {
+			if err := s.ReplaceCreatorOnlineProfile(existing.ID, identity); err != nil {
 				return nil, err
 			}
 			updated, err := s.Creator(existing.ID)
 			if err != nil {
 				return nil, err
 			}
-			if shouldPromotePlaceholderName(updated, name) {
+			if shouldPromotePlaceholderName(updated, name) || shouldCorrectNearMatchCreatorName(updated, name) {
 				updated, err = s.RenameCreator(updated.ID, name)
 				if err != nil {
 					return nil, err
@@ -1162,6 +1224,14 @@ func (s *Store) RenameCreator(id int64, desiredName string) (Creator, error) {
 }
 
 func (s *Store) UpdateCreatorOnlineProfile(id int64, identity CreatorIdentity) error {
+	return s.updateCreatorOnlineProfile(id, identity, false)
+}
+
+func (s *Store) ReplaceCreatorOnlineProfile(id int64, identity CreatorIdentity) error {
+	return s.updateCreatorOnlineProfile(id, identity, true)
+}
+
+func (s *Store) updateCreatorOnlineProfile(id int64, identity CreatorIdentity, replaceIdentity bool) error {
 	creator, err := s.Creator(id)
 	if err != nil {
 		return err
@@ -1174,6 +1244,11 @@ func (s *Store) UpdateCreatorOnlineProfile(id int64, identity CreatorIdentity) e
 	nextUID := firstNonEmpty(identity.UID, creator.BilibiliUID)
 	nextSecUID := firstNonEmpty(identity.SecUID, creator.BilibiliSecUID)
 	nextProfileURL := firstNonEmpty(identity.ProfileURL, creator.BilibiliProfileURL)
+	if replaceIdentity {
+		nextUID = firstNonEmpty(identity.UID, nextUID)
+		nextSecUID = firstNonEmpty(identity.SecUID, nextSecUID)
+		nextProfileURL = firstNonEmpty(identity.ProfileURL, nextProfileURL)
+	}
 	nextAvatarURL := firstNonEmpty(identity.AvatarURL, creator.AvatarURL)
 	nextAvatarFile := firstNonEmpty(identity.AvatarFile, creator.AvatarFile)
 	nextBio := firstNonEmpty(identity.Bio, creator.Bio)
@@ -1200,6 +1275,24 @@ WHERE id=?`,
 		id,
 	)
 	return err
+}
+
+func shouldCorrectNearMatchCreatorName(creator Creator, desiredName string) bool {
+	currentName := strings.TrimSpace(creator.Name)
+	desiredName = preferredCreatorName(desiredName)
+	if currentName == "" || desiredName == "" || currentName == desiredName || creator.WorkCount != 0 {
+		return false
+	}
+	return comparableCreatorName(currentName) != "" && comparableCreatorName(currentName) == comparableCreatorName(desiredName)
+}
+
+var comparableCreatorNameSeparators = regexp.MustCompile(`[\s\p{P}\p{S}_]+`)
+
+func comparableCreatorName(value string) string {
+	value = strings.ToLower(preferredCreatorName(value))
+	value = comparableCreatorNameSeparators.ReplaceAllString(value, "")
+	value = strings.ReplaceAll(value, "的", "")
+	return value
 }
 
 func firstNonEmpty(values ...string) string {
@@ -2306,8 +2399,9 @@ FROM update_queue_creators uqc JOIN creators c ON c.id=uqc.creator_id WHERE uqc.
 	return creators, rows.Err()
 }
 
-func (s *Store) CreateUpdateRun(queue UpdateQueue, total int) (UpdateRun, error) {
-	result, err := s.db.Exec(`INSERT INTO update_runs(queue_id, queue_name, total_creators, status, summary) VALUES(?, ?, ?, 'queued', ?)`, queue.ID, queue.Name, total, "已加入立即执行队列")
+func (s *Store) CreateUpdateRun(queue UpdateQueue, total int, triggerSource string) (UpdateRun, error) {
+	source := normalizeUpdateTriggerSource(triggerSource)
+	result, err := s.db.Exec(`INSERT INTO update_runs(queue_id, queue_name, total_creators, trigger_source, status, summary) VALUES(?, ?, ?, ?, 'queued', ?)`, queue.ID, queue.Name, total, source, "已加入立即执行队列")
 	if err != nil {
 		return UpdateRun{}, err
 	}
@@ -2319,12 +2413,13 @@ func (s *Store) CreateUpdateRun(queue UpdateQueue, total int) (UpdateRun, error)
 }
 
 func (s *Store) UpdateRun(id int64) (UpdateRun, error) {
-	row := s.db.QueryRow(`SELECT id, queue_id, queue_name, enqueued_at, total_creators, succeeded_creators, failed_creators, added_works, status, summary FROM update_runs WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT id, queue_id, queue_name, enqueued_at, started_at, finished_at, trigger_source, total_creators, succeeded_creators, failed_creators, added_works, status, summary FROM update_runs WHERE id=?`, id)
 	return scanUpdateRun(row)
 }
 
-func (s *Store) AddUpdateJobs(creatorIDs []int64, queueID, runID int64) ([]UpdateJob, error) {
+func (s *Store) AddUpdateJobs(creatorIDs []int64, queueID, runID int64, triggerSource string) ([]UpdateJob, error) {
 	jobs := make([]UpdateJob, 0, len(creatorIDs))
+	source := normalizeUpdateTriggerSource(triggerSource)
 	for _, creatorID := range creatorIDs {
 		if creatorID <= 0 {
 			continue
@@ -2342,7 +2437,7 @@ func (s *Store) AddUpdateJobs(creatorIDs []int64, queueID, runID int64) ([]Updat
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		result, err := s.db.Exec(`INSERT INTO update_jobs(creator_id, queue_id, run_id, status) VALUES(?, ?, ?, 'pending')`, creatorID, queueID, runID)
+		result, err := s.db.Exec(`INSERT INTO update_jobs(creator_id, queue_id, run_id, trigger_source, status) VALUES(?, ?, ?, ?, 'pending')`, creatorID, queueID, runID, source)
 		if err != nil {
 			return nil, err
 		}
@@ -2359,21 +2454,28 @@ func (s *Store) AddUpdateJobs(creatorIDs []int64, queueID, runID int64) ([]Updat
 	return jobs, nil
 }
 
-func (s *Store) AddFailedUpdateJob(creatorID, queueID, runID, retryOfJobID int64, attempt int, message string) (UpdateJob, error) {
+func (s *Store) AddFailedUpdateJob(creatorID, queueID, runID, retryOfJobID int64, attempt int, message string, triggerSources ...string) (UpdateJob, error) {
 	if creatorID <= 0 {
 		return UpdateJob{}, errors.New("creator_id is required")
 	}
 	if attempt <= 0 {
 		attempt = 1
 	}
-	result, err := s.db.Exec(`INSERT INTO update_jobs(creator_id, queue_id, run_id, retry_of_job_id, attempt, status, error, finished_at) VALUES(?, ?, ?, ?, ?, 'failed', ?, ?)`,
+	source := normalizeUpdateTriggerSource("")
+	if len(triggerSources) > 0 {
+		source = normalizeUpdateTriggerSource(triggerSources[0])
+	}
+	finishedAt := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.db.Exec(`INSERT INTO update_jobs(creator_id, queue_id, run_id, retry_of_job_id, attempt, trigger_source, status, error, started_at, finished_at) VALUES(?, ?, ?, ?, ?, ?, 'failed', ?, ?, ?)`,
 		creatorID,
 		queueID,
 		runID,
 		retryOfJobID,
 		attempt,
+		source,
 		strings.TrimSpace(message),
-		time.Now().UTC().Format(time.RFC3339),
+		finishedAt,
+		finishedAt,
 	)
 	if err != nil {
 		return UpdateJob{}, err
@@ -2383,7 +2485,9 @@ func (s *Store) AddFailedUpdateJob(creatorID, queueID, runID, retryOfJobID int64
 		return UpdateJob{}, err
 	}
 	if runID > 0 {
-		_, _ = s.db.Exec(`UPDATE update_runs SET failed_creators=failed_creators+1, status=CASE WHEN succeeded_creators + failed_creators + 1 >= total_creators THEN 'completed' ELSE status END, summary=? WHERE id=?`,
+		_, _ = s.db.Exec(`UPDATE update_runs SET failed_creators=failed_creators+1, status=CASE WHEN succeeded_creators + failed_creators + 1 >= total_creators THEN 'completed' ELSE status END, started_at=CASE WHEN started_at='' THEN ? ELSE started_at END, finished_at=CASE WHEN succeeded_creators + failed_creators + 1 >= total_creators THEN ? ELSE finished_at END, summary=? WHERE id=?`,
+			finishedAt,
+			finishedAt,
 			"成功 0 个UP主，新增 0 个作品",
 			runID,
 		)
@@ -2404,8 +2508,25 @@ FROM update_jobs j JOIN creators c ON c.id=j.creator_id WHERE j.id=?`, id)
 }
 
 func (s *Store) MarkUpdateJobRunning(id int64) error {
-	_, err := s.db.Exec(`UPDATE update_jobs SET status='running', started_at=?, finished_at='', download_speed_bps=0, progress_message='' WHERE id=?`, time.Now().UTC().Format(time.RFC3339), id)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`UPDATE update_jobs SET status='running', started_at=?, finished_at='', download_speed_bps=0, progress_message='' WHERE id=?`, now, id); err != nil {
+		return err
+	}
+	var runID int64
+	if err := tx.QueryRow(`SELECT run_id FROM update_jobs WHERE id=?`, id).Scan(&runID); err != nil {
+		return err
+	}
+	if runID > 0 {
+		if _, err := tx.Exec(`UPDATE update_runs SET status='running', started_at=CASE WHEN started_at='' THEN ? ELSE started_at END WHERE id=?`, now, runID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateUpdateJobProgress(id int64, totalWorks, processedWorks, downloadedMedia, skippedWorks int, speedBps int64, message, directory, notice string) error {
@@ -2433,7 +2554,8 @@ func (s *Store) FinishUpdateJob(id int64, status string, addedWorks int, message
 	if err := tx.QueryRow(`SELECT run_id, queue_id FROM update_jobs WHERE id=?`, id).Scan(&runID, &queueID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE update_jobs SET status=?, added_works=?, error=?, finished_at=?, download_speed_bps=0 WHERE id=?`, status, addedWorks, message, time.Now().UTC().Format(time.RFC3339), id); err != nil {
+	finishedAt := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`UPDATE update_jobs SET status=?, added_works=?, error=?, finished_at=?, download_speed_bps=0 WHERE id=?`, status, addedWorks, message, finishedAt, id); err != nil {
 		return err
 	}
 	if runID > 0 {
@@ -2451,8 +2573,9 @@ func (s *Store) FinishUpdateJob(id int64, status string, addedWorks int, message
   failed_creators=failed_creators+?,
   added_works=added_works+?,
   status=CASE WHEN succeeded_creators + failed_creators + ? + ? >= total_creators THEN 'completed' ELSE status END,
+  finished_at=CASE WHEN succeeded_creators + failed_creators + ? + ? >= total_creators THEN ? ELSE finished_at END,
   summary=?
-WHERE id=?`, successDelta, failedDelta, addedWorks, successDelta, failedDelta, summary, runID); err != nil {
+WHERE id=?`, successDelta, failedDelta, addedWorks, successDelta, failedDelta, successDelta, failedDelta, finishedAt, summary, runID); err != nil {
 			return err
 		}
 		if queueID > 0 {
@@ -2460,6 +2583,34 @@ WHERE id=?`, successDelta, failedDelta, addedWorks, successDelta, failedDelta, s
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) FailInterruptedUpdateJobs(message string) (int64, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "服务重启后更新任务已中断，请重新触发更新"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE update_jobs SET status='failed', error=?, finished_at=?, download_speed_bps=0 WHERE status IN ('pending','running')`, message, now)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE update_runs SET status='failed', finished_at=CASE WHEN finished_at='' THEN ? ELSE finished_at END, summary=? WHERE status IN ('queued','running')`, now, message); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return affected, nil
 }
 
 func (s *Store) UpdateJobs(limit int) ([]UpdateJob, error) {
@@ -2483,7 +2634,7 @@ FROM update_jobs j JOIN creators c ON c.id=j.creator_id ORDER BY j.id DESC LIMIT
 	return jobs, rows.Err()
 }
 
-func (s *Store) UpdateJobsPage(page, pageSize int) (UpdateJobsPage, error) {
+func (s *Store) UpdateJobsPage(page, pageSize int, statusFilter ...string) (UpdateJobsPage, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -2493,13 +2644,27 @@ func (s *Store) UpdateJobsPage(page, pageSize int) (UpdateJobsPage, error) {
 	if pageSize > 50 {
 		pageSize = 50
 	}
+	filter := strings.TrimSpace(firstNonEmpty(statusFilter...))
+	where := ""
+	args := []any{}
+	if filter != "" {
+		where = " WHERE j.status=?"
+		args = append(args, filter)
+	}
+	summary, err := s.UpdateJobsSummary()
+	if err != nil {
+		return UpdateJobsPage{}, err
+	}
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM update_jobs`).Scan(&total); err != nil {
+	countArgs := append([]any{}, args...)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM update_jobs j`+where, countArgs...).Scan(&total); err != nil {
 		return UpdateJobsPage{}, err
 	}
 	offset := (page - 1) * pageSize
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pageSize, offset)
 	rows, err := s.db.Query(updateJobSelectSQL+`
-FROM update_jobs j JOIN creators c ON c.id=j.creator_id ORDER BY j.id DESC LIMIT ? OFFSET ?`, pageSize, offset)
+FROM update_jobs j JOIN creators c ON c.id=j.creator_id`+where+` ORDER BY j.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return UpdateJobsPage{}, err
 	}
@@ -2519,7 +2684,36 @@ FROM update_jobs j JOIN creators c ON c.id=j.creator_id ORDER BY j.id DESC LIMIT
 	if total%pageSize != 0 {
 		totalPages++
 	}
-	return UpdateJobsPage{Jobs: jobs, Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages}, nil
+	return UpdateJobsPage{Jobs: jobs, Page: page, PageSize: pageSize, Total: total, TotalPages: totalPages, Summary: summary}, nil
+}
+
+func (s *Store) UpdateJobsSummary() (UpdateJobsSummary, error) {
+	var summary UpdateJobsSummary
+	rows, err := s.db.Query(`SELECT status, COUNT(*), COALESCE(SUM(added_works), 0) FROM update_jobs GROUP BY status`)
+	if err != nil {
+		return summary, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var count int
+		var added int
+		if err := rows.Scan(&status, &count, &added); err != nil {
+			return summary, err
+		}
+		switch status {
+		case "pending":
+			summary.Pending = count
+		case "running":
+			summary.Running = count
+		case "succeeded":
+			summary.Succeeded = count
+		case "failed":
+			summary.Failed = count
+		}
+		summary.AddedWorks += added
+	}
+	return summary, rows.Err()
 }
 
 func (s *Store) RunningUpdateJobs() ([]UpdateJob, error) {
@@ -2764,11 +2958,11 @@ FROM subtitle_records sr JOIN works w ON w.id=sr.work_id WHERE sr.work_id=?`, wo
 }
 
 func (s *Store) SubtitleTextForCreator(creatorID int64, token string) (string, bool, error) {
-	rows, err := s.db.Query(`SELECT w.title, sr.text_path, sr.token, sr.status
+	rows, err := s.db.Query(`SELECT w.title, w.published_at, sr.text_path, sr.token, sr.status
 FROM works w
 JOIN subtitle_records sr ON sr.work_id=w.id
 WHERE w.creator_id=?
-ORDER BY w.published_at, w.id`, creatorID)
+ORDER BY w.published_at DESC, w.id DESC`, creatorID)
 	if err != nil {
 		return "", false, err
 	}
@@ -2777,8 +2971,8 @@ ORDER BY w.published_at, w.id`, creatorID)
 	ready := false
 	authorized := false
 	for rows.Next() {
-		var title, path, actualToken, status string
-		if err := rows.Scan(&title, &path, &actualToken, &status); err != nil {
+		var title, publishedAt, path, actualToken, status string
+		if err := rows.Scan(&title, &publishedAt, &path, &actualToken, &status); err != nil {
 			return "", false, err
 		}
 		if token != "" && token == actualToken {
@@ -2795,6 +2989,10 @@ ORDER BY w.published_at, w.id`, creatorID)
 			builder.WriteString("\n\n")
 		}
 		builder.WriteString("## ")
+		if date := subtitleChapterDate(publishedAt); date != "" {
+			builder.WriteString(date)
+			builder.WriteString(" ")
+		}
 		builder.WriteString(strings.TrimSpace(title))
 		builder.WriteString("\n\n")
 		builder.Write(data)
@@ -2813,6 +3011,20 @@ ORDER BY w.published_at, w.id`, creatorID)
 		}
 	}
 	return builder.String(), ready, nil
+}
+
+func subtitleChapterDate(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed.UTC().Format("2006-01-02")
+	}
+	if parsed, err := time.Parse("2006-01-02", value); err == nil {
+		return parsed.Format("2006-01-02")
+	}
+	return ""
 }
 
 func (s *Store) CreateSubtitleQueue(name, cron string) (SubtitleQueue, error) {
@@ -3397,23 +3609,34 @@ func scanSubtitleQueue(scanner interface{ Scan(...any) error }) (SubtitleQueue, 
 func scanUpdateRun(scanner interface{ Scan(...any) error }) (UpdateRun, error) {
 	var run UpdateRun
 	var enqueued string
-	if err := scanner.Scan(&run.ID, &run.QueueID, &run.QueueName, &enqueued, &run.TotalCreators, &run.SucceededCreators, &run.FailedCreators, &run.AddedWorks, &run.Status, &run.Summary); err != nil {
+	if err := scanner.Scan(&run.ID, &run.QueueID, &run.QueueName, &enqueued, &run.StartedAt, &run.FinishedAt, &run.TriggerSource, &run.TotalCreators, &run.SucceededCreators, &run.FailedCreators, &run.AddedWorks, &run.Status, &run.Summary); err != nil {
 		return UpdateRun{}, err
 	}
 	run.EnqueuedAt = parseDBTime(enqueued)
+	run.TriggerSource = normalizeUpdateTriggerSource(run.TriggerSource)
 	return run, nil
 }
 
-const updateJobSelectSQL = `SELECT j.id, j.creator_id, c.name, j.queue_id, j.run_id, j.retry_of_job_id, j.attempt, j.status, j.added_works, j.total_works, j.processed_works, j.downloaded_media, j.skipped_works, j.download_speed_bps, j.progress_message, j.download_directory, j.download_notice, j.error, j.created_at, j.started_at, j.finished_at`
+const updateJobSelectSQL = `SELECT j.id, j.creator_id, c.name, j.queue_id, j.run_id, j.retry_of_job_id, j.attempt, j.status, j.trigger_source, j.added_works, j.total_works, j.processed_works, j.downloaded_media, j.skipped_works, j.download_speed_bps, j.progress_message, j.download_directory, j.download_notice, j.error, j.created_at, j.started_at, j.finished_at`
 
 func scanUpdateJob(scanner interface{ Scan(...any) error }) (UpdateJob, error) {
 	var job UpdateJob
 	var created string
-	if err := scanner.Scan(&job.ID, &job.CreatorID, &job.CreatorName, &job.QueueID, &job.RunID, &job.RetryOfJobID, &job.Attempt, &job.Status, &job.AddedWorks, &job.TotalWorks, &job.ProcessedWorks, &job.DownloadedMedia, &job.SkippedWorks, &job.DownloadSpeedBps, &job.ProgressMessage, &job.DownloadDirectory, &job.DownloadNotice, &job.Error, &created, &job.StartedAt, &job.FinishedAt); err != nil {
+	if err := scanner.Scan(&job.ID, &job.CreatorID, &job.CreatorName, &job.QueueID, &job.RunID, &job.RetryOfJobID, &job.Attempt, &job.Status, &job.TriggerSource, &job.AddedWorks, &job.TotalWorks, &job.ProcessedWorks, &job.DownloadedMedia, &job.SkippedWorks, &job.DownloadSpeedBps, &job.ProgressMessage, &job.DownloadDirectory, &job.DownloadNotice, &job.Error, &created, &job.StartedAt, &job.FinishedAt); err != nil {
 		return UpdateJob{}, err
 	}
 	job.CreatedAt = parseDBTime(created)
+	job.TriggerSource = normalizeUpdateTriggerSource(job.TriggerSource)
 	return job, nil
+}
+
+func normalizeUpdateTriggerSource(value string) string {
+	switch strings.TrimSpace(value) {
+	case "scheduled":
+		return "scheduled"
+	default:
+		return "manual"
+	}
 }
 
 const subtitleJobSelectSQL = `SELECT j.id, j.creator_id, c.name, j.work_id, COALESCE(w.title, ''), j.queue_id, j.run_id, j.retry_of_job_id, j.attempt, j.source, j.status, j.total_works, j.processed_works, j.subtitle_count, j.skipped_works, j.progress_message, j.output_directory, j.error, j.created_at, j.started_at, j.finished_at`

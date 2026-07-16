@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,7 @@ const bilibiliRequestAttempts = 3
 type BilibiliDownloader struct {
 	BaseURL         string
 	VideoAPIBaseURL string
+	SpaceAPIBaseURL string
 	HTTPClient      *http.Client
 }
 
@@ -46,6 +49,14 @@ func (e permanentMediaError) Error() string {
 		return fmt.Sprintf("媒体下载失败 %s: HTTP %d", file, e.Status)
 	}
 	return fmt.Sprintf("媒体下载失败 %s", file)
+}
+
+type permanentYTDLPError struct {
+	Message string
+}
+
+func (e permanentYTDLPError) Error() string {
+	return "yt-dlp 执行失败: " + sanitizeYTDLPError(e.Message)
 }
 
 type bilibiliUser struct {
@@ -85,9 +96,108 @@ type bilibiliVideoViewResponse struct {
 	Message string `json:"message"`
 	Data    struct {
 		BVID    string `json:"bvid"`
+		CID     int64  `json:"cid"`
 		Title   string `json:"title"`
 		Desc    string `json:"desc"`
 		Pubdate int64  `json:"pubdate"`
+	} `json:"data"`
+}
+
+type bilibiliVideoPlayURLResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Quality int `json:"quality"`
+		DURL    []struct {
+			URL    string   `json:"url"`
+			Backup []string `json:"backup_url"`
+			Size   int64    `json:"size"`
+			Length int64    `json:"length"`
+		} `json:"durl"`
+	} `json:"data"`
+}
+
+type bilibiliSpaceArchiveResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		List struct {
+			Videos []bilibiliSpaceArchiveVideo `json:"vlist"`
+		} `json:"list"`
+		Page struct {
+			Count int `json:"count"`
+			PN    int `json:"pn"`
+			PS    int `json:"ps"`
+		} `json:"page"`
+	} `json:"data"`
+}
+
+type bilibiliSpaceArchiveVideo struct {
+	AID            int64  `json:"aid"`
+	BVID           string `json:"bvid"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	Pic            string `json:"pic"`
+	Author         string `json:"author"`
+	MID            int64  `json:"mid"`
+	Created        int64  `json:"created"`
+	Pubdate        int64  `json:"pubdate"`
+	CTime          int64  `json:"ctime"`
+	Length         string `json:"length"`
+	Duration       int64  `json:"duration"`
+	IsPay          int    `json:"is_pay"`
+	IsUnionVideo   int    `json:"is_union_video"`
+	IsSteinsGate   int    `json:"is_steins_gate"`
+	IsLivePlayback int    `json:"is_live_playback"`
+	IsLessonVideo  int    `json:"is_lesson_video"`
+	Interactive    bool   `json:"interactive_video"`
+	SeasonID       int64  `json:"season_id"`
+}
+
+type bilibiliSpaceSeasonListResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Items struct {
+			Seasons []bilibiliSpaceSeason `json:"seasons_list"`
+		} `json:"items_lists"`
+	} `json:"data"`
+}
+
+type bilibiliSpaceSeason struct {
+	Meta     bilibiliSpaceSeasonMeta     `json:"meta"`
+	Archives []bilibiliSpaceArchiveVideo `json:"archives"`
+}
+
+type bilibiliSpaceSeasonMeta struct {
+	MID      int64  `json:"mid"`
+	SeasonID int64  `json:"season_id"`
+	Title    string `json:"title"`
+	Name     string `json:"name"`
+	Total    int    `json:"total"`
+}
+
+type bilibiliSpaceSeasonArchiveResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Archives []bilibiliSpaceArchiveVideo `json:"archives"`
+		Meta     bilibiliSpaceSeasonMeta     `json:"meta"`
+		Page     struct {
+			Total    int `json:"total"`
+			PageNum  int `json:"page_num"`
+			PageSize int `json:"page_size"`
+		} `json:"page"`
+	} `json:"data"`
+}
+
+type bilibiliDynamicFeedResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    struct {
+		Items   []json.RawMessage `json:"items"`
+		HasMore flexibleBool      `json:"has_more"`
+		Offset  string            `json:"offset"`
 	} `json:"data"`
 }
 
@@ -199,6 +309,7 @@ type ytdlpEntry struct {
 
 type bilibiliVideoDetail struct {
 	BVID        string
+	CID         int64
 	Title       string
 	Description string
 	PublishedAt string
@@ -530,6 +641,7 @@ func (d BilibiliDownloader) fetchBilibiliVideoDetail(ctx context.Context, bvid, 
 	}
 	detail := bilibiliVideoDetail{
 		BVID:        firstNonEmpty(body.Data.BVID, bvid),
+		CID:         body.Data.CID,
 		Title:       strings.TrimSpace(body.Data.Title),
 		Description: strings.TrimSpace(body.Data.Desc),
 		SourceURL:   sourceURL,
@@ -538,6 +650,53 @@ func (d BilibiliDownloader) fetchBilibiliVideoDetail(ctx context.Context, bvid, 
 		detail.PublishedAt = time.Unix(body.Data.Pubdate, 0).UTC().Format(time.RFC3339)
 	}
 	return detail, nil
+}
+
+func (d BilibiliDownloader) fetchBilibiliProgressiveURL(ctx context.Context, detail bilibiliVideoDetail, cookie string) (string, error) {
+	bvid := strings.TrimSpace(detail.BVID)
+	if bvid == "" || detail.CID <= 0 {
+		return "", errors.New("缺少 B站视频 bvid 或 cid")
+	}
+	endpoint := "https://api.bilibili.com/x/player/playurl"
+	if strings.TrimSpace(d.VideoAPIBaseURL) != "" {
+		endpoint = strings.TrimRight(d.VideoAPIBaseURL, "/") + "/x/player/playurl"
+	} else if strings.TrimSpace(d.BaseURL) != "" {
+		endpoint = strings.TrimRight(d.BaseURL, "/") + "/x/player/playurl"
+	}
+	values := url.Values{}
+	values.Set("bvid", bvid)
+	values.Set("cid", strconv.FormatInt(detail.CID, 10))
+	values.Set("qn", "80")
+	values.Set("fnval", "0")
+	values.Set("fourk", "1")
+	sourceURL := firstNonEmpty(detail.SourceURL, "https://www.bilibili.com/video/"+bvid)
+	req, err := d.newRequest(ctx, endpoint+"?"+values.Encode(), cookie)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Referer", sourceURL)
+	var body bilibiliVideoPlayURLResponse
+	if err := d.doJSON(req, &body); err != nil {
+		return "", err
+	}
+	if body.Code != 0 {
+		message := strings.TrimSpace(body.Message)
+		if message == "" {
+			message = "B站视频播放地址接口返回失败"
+		}
+		return "", errors.New(message)
+	}
+	for _, item := range body.Data.DURL {
+		if strings.TrimSpace(item.URL) != "" {
+			return strings.TrimSpace(item.URL), nil
+		}
+		for _, backup := range item.Backup {
+			if strings.TrimSpace(backup) != "" {
+				return strings.TrimSpace(backup), nil
+			}
+		}
+	}
+	return "", errors.New("B站视频播放地址接口未返回 MP4 地址")
 }
 
 func isNumericCreatorName(name, mid string) bool {
@@ -563,7 +722,25 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 	maxWorks := ytdlpMaxWorks()
 	playlist, err := d.fetchYTDLPPlaylist(ctx, profileURL, task.Cookie, maxWorks)
 	if err != nil {
-		return d.repairExistingMetadataAfterPlaylistFailure(ctx, task, err)
+		fallback, fallbackErr := d.fetchBilibiliSpaceArchivePlaylist(ctx, profileURL, task.Cookie, maxWorks)
+		if fallbackErr != nil {
+			seasonFallback, seasonErr := d.fetchBilibiliSpaceSeasonPlaylist(ctx, profileURL, task.Cookie, maxWorks)
+			if seasonErr != nil {
+				dynamicFallback, dynamicErr := d.fetchBilibiliDynamicFeedPlaylist(ctx, profileURL, task.Cookie, maxWorks)
+				if dynamicErr != nil {
+					combinedErr := fmt.Errorf("yt-dlp列表获取失败: %s；B站空间分页列表失败: %s；B站合集分页列表失败: %s；B站动态流列表失败: %s", sanitizeYTDLPError(err.Error()), sanitizeYTDLPError(fallbackErr.Error()), sanitizeYTDLPError(seasonErr.Error()), sanitizeYTDLPError(dynamicErr.Error()))
+					return d.repairExistingMetadataAfterPlaylistFailure(ctx, task, combinedErr)
+				}
+				playlist = dynamicFallback
+				reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), Message: "yt-dlp列表获取失败，已改用B站动态流列表", Directory: task.OutputDir, Notice: sanitizeYTDLPError(err.Error())})
+			} else {
+				playlist = seasonFallback
+				reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), Message: "yt-dlp列表获取失败，已改用B站合集分页列表", Directory: task.OutputDir, Notice: sanitizeYTDLPError(err.Error())})
+			}
+		} else {
+			playlist = fallback
+			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), Message: "yt-dlp列表获取失败，已改用B站空间分页列表", Directory: task.OutputDir, Notice: sanitizeYTDLPError(err.Error())})
+		}
 	}
 	mid := firstNonEmpty(playlist.UploaderID, playlist.ChannelID, playlist.ID, extractBilibiliMID(profileURL))
 	creatorName := preferredCreatorName(firstNonEmpty(playlist.Uploader, playlist.Channel, playlist.Title, task.Creator.Name, mid))
@@ -583,6 +760,10 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 	reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), Message: "已获取B站作品列表", Directory: task.OutputDir, Notice: creatorBio})
 
 	existing, err := existingLocalBilibiliMetadataPaths(task.OutputDir)
+	if err != nil {
+		return DownloadResult{}, err
+	}
+	existingFlat, err := existingAwemeIDs(task.OutputDir)
 	if err != nil {
 		return DownloadResult{}, err
 	}
@@ -609,6 +790,12 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "跳过已下载作品", Directory: task.OutputDir})
 			continue
 		}
+		if existingFlat[workID] {
+			processed++
+			skipped++
+			reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(playlist.Entries), ProcessedWorks: processed, DownloadedMedia: downloadedMedia, SkippedWorks: skipped, Message: "跳过已下载作品", Directory: task.OutputDir})
+			continue
+		}
 		mediaCount, err := d.downloadYTDLPEntry(ctx, task.OutputDir, entry, localBilibiliDownloadCreatorMeta{MID: mid, Name: creatorName, SpaceURL: spaceURL, AvatarURL: creatorAvatarURL, Bio: creatorBio}, task.Cookie)
 		if err != nil {
 			if isPermanentYTDLPError(err) {
@@ -620,6 +807,7 @@ func (d BilibiliDownloader) updateCreatorWithYTDLP(ctx context.Context, task Dow
 			return DownloadResult{AddedWorks: added, CreatorName: creatorName}, err
 		}
 		existing[workID] = "downloaded"
+		existingFlat[workID] = true
 		added++
 		processed++
 		downloadedMedia += mediaCount
@@ -659,7 +847,7 @@ func (d BilibiliDownloader) repairExistingMetadataAfterPlaylistFailure(ctx conte
 		notice = fmt.Sprintf("列表获取失败后已尝试修复本地元数据：成功 %d，失败 %d", repaired, failed)
 	}
 	reportDownloadProgress(task.Progress, DownloadProgress{TotalWorks: len(existing), ProcessedWorks: processed, SkippedWorks: skipped, Message: "本地作品元数据修复完成", Directory: task.OutputDir, Notice: notice})
-	if repaired == 0 && failed == len(existing) {
+	if repaired == 0 {
 		return DownloadResult{}, playlistErr
 	}
 	return DownloadResult{AddedWorks: 0, CreatorName: task.Creator.Name}, nil
@@ -834,6 +1022,363 @@ func (d BilibiliDownloader) fetchYTDLPPlaylist(ctx context.Context, profileURL, 
 	return playlist, nil
 }
 
+func (d BilibiliDownloader) fetchBilibiliSpaceArchivePlaylist(ctx context.Context, profileURL, cookie string, limit int) (ytdlpPlaylist, error) {
+	mid := extractBilibiliMID(profileURL)
+	if mid == "" {
+		return ytdlpPlaylist{}, errors.New("无法从B站主页解析 mid")
+	}
+	endpoint := d.bilibiliSpaceEndpoint("/x/space/arc/search")
+	const pageSize = 50
+	playlist := ytdlpPlaylist{
+		ID:         mid,
+		UploaderID: mid,
+		ChannelID:  mid,
+		WebpageURL: normalizeBilibiliSpaceURL(profileURL, mid),
+	}
+	seen := map[string]bool{}
+	for page := 1; page <= 200; page++ {
+		values := url.Values{}
+		values.Set("mid", mid)
+		values.Set("pn", strconv.Itoa(page))
+		values.Set("ps", strconv.Itoa(pageSize))
+		values.Set("order", "pubdate")
+		req, err := d.newRequest(ctx, endpoint+"?"+values.Encode(), cookie)
+		if err != nil {
+			return ytdlpPlaylist{}, err
+		}
+		req.Header.Set("Referer", "https://space.bilibili.com/"+mid+"/video")
+		var body bilibiliSpaceArchiveResponse
+		if err := d.doJSON(req, &body); err != nil {
+			return ytdlpPlaylist{}, err
+		}
+		if body.Code != 0 {
+			message := strings.TrimSpace(body.Message)
+			if message == "" {
+				message = "B站空间作品列表接口返回失败"
+			}
+			return ytdlpPlaylist{}, errors.New(message)
+		}
+		videos := body.Data.List.Videos
+		if len(videos) == 0 {
+			break
+		}
+		for _, video := range videos {
+			entry := ytdlpEntryFromSpaceArchive(video)
+			id := ytdlpEntryID(entry)
+			if id == "" || seen[id] || !isSupportedSpaceArchiveVideo(video) {
+				continue
+			}
+			seen[id] = true
+			if playlist.Uploader == "" {
+				playlist.Uploader = strings.TrimSpace(video.Author)
+			}
+			playlist.Entries = append(playlist.Entries, entry)
+			if limit > 0 && len(playlist.Entries) >= limit {
+				return playlist, nil
+			}
+		}
+		if body.Data.Page.Count > 0 && page*pageSize >= body.Data.Page.Count {
+			break
+		}
+	}
+	if len(playlist.Entries) == 0 {
+		return ytdlpPlaylist{}, errors.New("B站空间作品列表未返回可下载视频")
+	}
+	if playlist.Title == "" {
+		playlist.Title = firstNonEmpty(playlist.Uploader, mid)
+	}
+	return playlist, nil
+}
+
+func (d BilibiliDownloader) fetchBilibiliSpaceSeasonPlaylist(ctx context.Context, profileURL, cookie string, limit int) (ytdlpPlaylist, error) {
+	mid := extractBilibiliMID(profileURL)
+	if mid == "" {
+		return ytdlpPlaylist{}, errors.New("无法从B站主页解析 mid")
+	}
+	values := url.Values{}
+	values.Set("mid", mid)
+	values.Set("page_num", "1")
+	values.Set("page_size", "20")
+	listURL := d.bilibiliSpaceEndpoint("/x/polymer/web-space/seasons_series_list") + "?" + values.Encode()
+	req, err := d.newRequest(ctx, listURL, cookie)
+	if err != nil {
+		return ytdlpPlaylist{}, err
+	}
+	req.Header.Set("Referer", "https://space.bilibili.com/"+mid+"/video")
+	var seasonsBody bilibiliSpaceSeasonListResponse
+	if err := d.doJSON(req, &seasonsBody); err != nil {
+		return ytdlpPlaylist{}, err
+	}
+	if seasonsBody.Code != 0 {
+		message := strings.TrimSpace(seasonsBody.Message)
+		if message == "" {
+			message = "B站合集列表接口返回失败"
+		}
+		return ytdlpPlaylist{}, errors.New(message)
+	}
+	seasons := seasonsBody.Data.Items.Seasons
+	if len(seasons) == 0 {
+		return ytdlpPlaylist{}, errors.New("B站合集列表未返回合集")
+	}
+	const pageSize = 30
+	playlist := ytdlpPlaylist{
+		ID:         mid,
+		UploaderID: mid,
+		ChannelID:  mid,
+		WebpageURL: normalizeBilibiliSpaceURL(profileURL, mid),
+	}
+	seen := map[string]bool{}
+	for _, season := range seasons {
+		seasonID := season.Meta.SeasonID
+		if seasonID <= 0 {
+			continue
+		}
+		total := season.Meta.Total
+		for page := 1; page <= 200; page++ {
+			values := url.Values{}
+			values.Set("mid", mid)
+			values.Set("season_id", strconv.FormatInt(seasonID, 10))
+			values.Set("page_num", strconv.Itoa(page))
+			values.Set("page_size", strconv.Itoa(pageSize))
+			req, err := d.newRequest(ctx, d.bilibiliSpaceEndpoint("/x/polymer/web-space/seasons_archives_list")+"?"+values.Encode(), cookie)
+			if err != nil {
+				return ytdlpPlaylist{}, err
+			}
+			req.Header.Set("Referer", "https://space.bilibili.com/"+mid+"/channel/collectiondetail?sid="+strconv.FormatInt(seasonID, 10))
+			var body bilibiliSpaceSeasonArchiveResponse
+			if err := d.doJSON(req, &body); err != nil {
+				return ytdlpPlaylist{}, err
+			}
+			if body.Code != 0 {
+				message := strings.TrimSpace(body.Message)
+				if message == "" {
+					message = "B站合集作品列表接口返回失败"
+				}
+				return ytdlpPlaylist{}, errors.New(message)
+			}
+			videos := body.Data.Archives
+			if len(videos) == 0 {
+				break
+			}
+			if body.Data.Page.Total > 0 {
+				total = body.Data.Page.Total
+			}
+			for _, video := range videos {
+				if video.MID == 0 {
+					video.MID = parseInt64(mid)
+				}
+				if video.SeasonID == 0 {
+					video.SeasonID = seasonID
+				}
+				entry := ytdlpEntryFromSpaceArchive(video)
+				id := ytdlpEntryID(entry)
+				if id == "" || seen[id] || !isSupportedSpaceArchiveVideo(video) {
+					continue
+				}
+				seen[id] = true
+				if playlist.Uploader == "" {
+					playlist.Uploader = strings.TrimSpace(video.Author)
+				}
+				playlist.Entries = append(playlist.Entries, entry)
+				if limit > 0 && len(playlist.Entries) >= limit {
+					playlist.Title = firstNonEmpty(playlist.Title, playlist.Uploader, mid)
+					return playlist, nil
+				}
+			}
+			if total > 0 && page*pageSize >= total {
+				break
+			}
+			if len(videos) < pageSize {
+				break
+			}
+		}
+	}
+	if len(playlist.Entries) == 0 {
+		return ytdlpPlaylist{}, errors.New("B站合集作品列表未返回可下载视频")
+	}
+	if playlist.Title == "" {
+		playlist.Title = firstNonEmpty(playlist.Uploader, mid)
+	}
+	return playlist, nil
+}
+
+func (d BilibiliDownloader) fetchBilibiliDynamicFeedPlaylist(ctx context.Context, profileURL, cookie string, limit int) (ytdlpPlaylist, error) {
+	mid := extractBilibiliMID(profileURL)
+	if mid == "" {
+		return ytdlpPlaylist{}, errors.New("无法从B站主页解析 mid")
+	}
+	playlist := ytdlpPlaylist{
+		ID:         mid,
+		UploaderID: mid,
+		ChannelID:  mid,
+		WebpageURL: normalizeBilibiliSpaceURL(profileURL, mid),
+	}
+	seen := map[string]bool{}
+	offset := ""
+	for page := 1; page <= 200; page++ {
+		values := url.Values{}
+		values.Set("host_mid", mid)
+		values.Set("timezone_offset", "-480")
+		values.Set("features", "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,decorationCard,forwardListHidden,ugcDelete,onlyfansQaCard")
+		if offset != "" {
+			values.Set("offset", offset)
+		}
+		req, err := d.newRequest(ctx, d.bilibiliSpaceEndpoint("/x/polymer/web-dynamic/desktop/v1/feed/space")+"?"+values.Encode(), cookie)
+		if err != nil {
+			return ytdlpPlaylist{}, err
+		}
+		req.Header.Set("Referer", "https://space.bilibili.com/"+mid+"/dynamic")
+		var body bilibiliDynamicFeedResponse
+		if err := d.doJSON(req, &body); err != nil {
+			return ytdlpPlaylist{}, err
+		}
+		if body.Code != 0 {
+			message := strings.TrimSpace(body.Message)
+			if message == "" {
+				message = "B站动态流接口返回失败"
+			}
+			return ytdlpPlaylist{}, errors.New(message)
+		}
+		if len(body.Data.Items) == 0 {
+			break
+		}
+		for _, item := range body.Data.Items {
+			for _, bvid := range extractBVIDsFromJSON(item) {
+				if seen[bvid] {
+					continue
+				}
+				seen[bvid] = true
+				playlist.Entries = append(playlist.Entries, ytdlpEntry{
+					ID:         bvid,
+					Title:      bvid,
+					WebpageURL: "https://www.bilibili.com/video/" + bvid,
+					URL:        "https://www.bilibili.com/video/" + bvid,
+					UploaderID: mid,
+				})
+				if limit > 0 && len(playlist.Entries) >= limit {
+					return playlist, nil
+				}
+			}
+		}
+		nextOffset := strings.TrimSpace(body.Data.Offset)
+		if !bool(body.Data.HasMore) || nextOffset == "" || nextOffset == offset {
+			break
+		}
+		offset = nextOffset
+	}
+	if len(playlist.Entries) == 0 {
+		return ytdlpPlaylist{}, errors.New("B站动态流列表未返回可下载视频")
+	}
+	return playlist, nil
+}
+
+func (d BilibiliDownloader) bilibiliSpaceEndpoint(path string) string {
+	base := "https://api.bilibili.com"
+	if strings.TrimSpace(d.SpaceAPIBaseURL) != "" {
+		base = strings.TrimRight(d.SpaceAPIBaseURL, "/")
+	} else if strings.TrimSpace(d.VideoAPIBaseURL) != "" {
+		base = strings.TrimRight(d.VideoAPIBaseURL, "/")
+	}
+	return base + path
+}
+
+func ytdlpEntryFromSpaceArchive(video bilibiliSpaceArchiveVideo) ytdlpEntry {
+	bvid := strings.TrimSpace(video.BVID)
+	return ytdlpEntry{
+		ID:          bvid,
+		Title:       strings.TrimSpace(video.Title),
+		Description: strings.TrimSpace(video.Description),
+		WebpageURL:  "https://www.bilibili.com/video/" + bvid,
+		URL:         "https://www.bilibili.com/video/" + bvid,
+		Duration:    bilibiliArchiveDurationSeconds(video),
+		Timestamp:   firstPositiveInt64(video.Created, video.Pubdate, video.CTime),
+		Thumbnail:   normalizeBilibiliImageURL(video.Pic),
+		Uploader:    strings.TrimSpace(video.Author),
+		UploaderID:  strconv.FormatInt(video.MID, 10),
+	}
+}
+
+func isSupportedSpaceArchiveVideo(video bilibiliSpaceArchiveVideo) bool {
+	if strings.TrimSpace(video.BVID) == "" {
+		return false
+	}
+	if video.IsPay != 0 || video.IsSteinsGate != 0 || video.IsLivePlayback != 0 || video.IsLessonVideo != 0 || video.Interactive {
+		return false
+	}
+	return true
+}
+
+func bilibiliArchiveDurationSeconds(video bilibiliSpaceArchiveVideo) float64 {
+	if strings.TrimSpace(video.Length) != "" {
+		return parseBilibiliDurationSeconds(video.Length)
+	}
+	if video.Duration > 0 {
+		return float64(video.Duration)
+	}
+	return 0
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func parseInt64(value string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	return n
+}
+
+func parseBilibiliDurationSeconds(value string) float64 {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	if len(parts) == 0 {
+		return 0
+	}
+	total := 0
+	for _, part := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 0 {
+			return 0
+		}
+		total = total*60 + n
+	}
+	return float64(total)
+}
+
+func normalizeBilibiliImageURL(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "//") {
+		return "https:" + value
+	}
+	if strings.HasPrefix(value, "http://") {
+		return "https://" + strings.TrimPrefix(value, "http://")
+	}
+	return value
+}
+
+var bilibiliBVIDInJSONPattern = regexp.MustCompile(`BV[0-9A-Za-z]{6,14}`)
+
+func extractBVIDsFromJSON(data []byte) []string {
+	matches := bilibiliBVIDInJSONPattern.FindAll(data, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	bvids := []string{}
+	for _, match := range matches {
+		bvid := string(match)
+		if seen[bvid] {
+			continue
+		}
+		seen[bvid] = true
+		bvids = append(bvids, bvid)
+	}
+	return bvids
+}
+
 func unmarshalYTDLPJSON(output []byte, target any) error {
 	if err := json.Unmarshal(output, target); err == nil {
 		return nil
@@ -905,19 +1450,18 @@ func (d BilibiliDownloader) downloadYTDLPEntry(ctx context.Context, outputDir st
 		title = workID
 	}
 	date := ytdlpEntryDateWithDetail(entry, detail)
-	workDir := filepath.Join(outputDir, fmt.Sprintf("%s_%s_%s", date, title, workID))
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
+	prefix := fmt.Sprintf("%s_%s_%s", date, title, workID)
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return 0, err
 	}
+	cleanupYTDLPTempFiles(outputDir)
 	args := []string{
 		"--no-playlist",
 		"--no-warnings",
 		"--write-info-json",
-		"--write-thumbnail",
-		"--convert-thumbnails", "jpg",
 		"-f", ytdlpFormat(),
 		"--merge-output-format", "mp4",
-		"-o", filepath.Join(workDir, "media_001.%(ext)s"),
+		"-o", filepath.Join(outputDir, "media_001.%(ext)s"),
 	}
 	if section := strings.TrimSpace(os.Getenv("LOCALBILIBILI_YTDLP_DOWNLOAD_SECTIONS")); section != "" {
 		args = append(args, "--download-sections", section)
@@ -925,44 +1469,123 @@ func (d BilibiliDownloader) downloadYTDLPEntry(ctx context.Context, outputDir st
 	args = appendYTDLPCookieHeader(args, cookie)
 	args = append(args, targetURL)
 	if _, err := d.runYTDLP(ctx, args...); err != nil {
-		_ = os.RemoveAll(workDir)
+		cleanupYTDLPTempFiles(outputDir)
+		if fallbackErr := d.downloadBilibiliProgressiveEntry(ctx, outputDir, prefix, workID, detail, entry, creator, targetURL, cookie); fallbackErr == nil {
+			return 1, nil
+		}
 		return 0, err
 	}
-	mediaFile, err := findDownloadedMedia(workDir)
+	mediaFile, err := findDownloadedMedia(outputDir)
 	if err != nil {
-		_ = os.RemoveAll(workDir)
+		cleanupYTDLPTempFiles(outputDir)
 		return 0, err
 	}
-	sourceFile := filepath.Join(workDir, "source.ytdlp.json")
 	var infoEntry ytdlpEntry
-	if info := findFirstBySuffix(workDir, ".info.json"); info != "" {
+	if info := findFirstBySuffix(outputDir, ".info.json"); info != "" {
 		infoEntry = readYTDLPInfoEntry(info)
-		_ = os.Rename(info, sourceFile)
+		_ = os.Remove(info)
 	}
-	coverFile := ""
-	if thumb := findDownloadedThumbnail(workDir); thumb != "" {
-		coverFile = "cover" + strings.ToLower(filepath.Ext(thumb))
-		_ = os.Rename(thumb, filepath.Join(workDir, coverFile))
+	mediaExt := strings.ToLower(filepath.Ext(mediaFile))
+	if mediaExt == "" {
+		mediaExt = ".mp4"
 	}
-	meta := localBilibiliDownloadMetadata{
-		WorkType:    classifyYTDLPWorkType(entry),
-		BVID:        workID,
-		Title:       preferredVideoTitle(workID, detail.Title, infoEntry.Title, entry.Title),
-		Description: firstNonEmpty(detail.Description, infoEntry.Description, entry.Description),
-		PublishedAt: firstNonEmpty(detail.PublishedAt, ytdlpEntryPublishedAt(infoEntry), ytdlpEntryPublishedAt(entry)),
-		SourceURL:   firstNonEmpty(detail.SourceURL, infoEntry.WebpageURL, targetURL),
-		CoverFile:   coverFile,
-		Creator:     creator,
-		Media:       []localBilibiliDownloadMediaMeta{{Type: "video", File: filepath.Base(mediaFile)}},
-	}
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
+	targetMedia := filepath.Join(outputDir, prefix+mediaExt)
+	if err := os.Rename(mediaFile, targetMedia); err != nil {
+		cleanupYTDLPTempFiles(outputDir)
 		return 0, err
 	}
-	if err := os.WriteFile(filepath.Join(workDir, "metadata.localbilibili.json"), data, 0o644); err != nil {
+	if err := writeFlatYTDLPMetadata(outputDir, prefix, workID, detail, infoEntry, entry, creator, targetURL); err != nil {
+		_ = os.Remove(targetMedia)
 		return 0, err
 	}
+	cleanupYTDLPTempFiles(outputDir)
 	return 1, nil
+}
+
+func (d BilibiliDownloader) downloadBilibiliProgressiveEntry(ctx context.Context, outputDir, prefix, workID string, detail bilibiliVideoDetail, entry ytdlpEntry, creator localBilibiliDownloadCreatorMeta, targetURL, cookie string) error {
+	if strings.TrimSpace(detail.BVID) == "" || detail.CID <= 0 {
+		nextDetail, err := d.fetchBilibiliVideoDetail(ctx, workID, cookie)
+		if err != nil {
+			return err
+		}
+		detail = nextDetail
+	}
+	mediaURL, err := d.fetchBilibiliProgressiveURL(ctx, detail, cookie)
+	if err != nil {
+		return err
+	}
+	targetMedia := filepath.Join(outputDir, prefix+".mp4")
+	if err := d.downloadFileWithReferer(ctx, mediaURL, targetMedia, cookie, firstNonEmpty(detail.SourceURL, targetURL)); err != nil {
+		_ = os.Remove(targetMedia)
+		return err
+	}
+	if err := writeFlatYTDLPMetadata(outputDir, prefix, workID, detail, ytdlpEntry{}, entry, creator, targetURL); err != nil {
+		_ = os.Remove(targetMedia)
+		return err
+	}
+	cleanupYTDLPTempFiles(outputDir)
+	return nil
+}
+
+func writeFlatYTDLPMetadata(outputDir, prefix, workID string, detail bilibiliVideoDetail, infoEntry, entry ytdlpEntry, creator localBilibiliDownloadCreatorMeta, targetURL string) error {
+	publishedAt := firstNonEmpty(detail.PublishedAt, ytdlpEntryPublishedAt(infoEntry), ytdlpEntryPublishedAt(entry))
+	createTime := int64(0)
+	if publishedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339, publishedAt); err == nil {
+			createTime = parsed.Unix()
+		}
+	}
+	sourceURL := firstNonEmpty(detail.SourceURL, infoEntry.WebpageURL, targetURL)
+	title := preferredVideoTitle(workID, detail.Title, infoEntry.Title, entry.Title)
+	data := map[string]any{
+		"aweme_id":    workID,
+		"title":       title,
+		"desc":        firstNonEmpty(detail.Description, infoEntry.Description, entry.Description, title),
+		"create_time": createTime,
+		"share_url":   sourceURL,
+		"author": map[string]any{
+			"uid":       creator.MID,
+			"sec_uid":   creator.MID,
+			"nickname":  creator.Name,
+			"signature": creator.Bio,
+			"share_info": map[string]any{
+				"share_url": creator.SpaceURL,
+			},
+			"avatar_300x300": map[string]any{
+				"url_list": []string{creator.AvatarURL},
+			},
+			"avatar_thumb": map[string]any{
+				"url_list": []string{creator.AvatarURL},
+			},
+		},
+		"music": map[string]any{
+			"title": "",
+		},
+		"source_type": "yt-dlp",
+		"bvid":        workID,
+		"work_type":   classifyYTDLPWorkType(entry),
+	}
+	payload, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(outputDir, prefix+"_data.json"), payload, 0o644)
+}
+
+func cleanupYTDLPTempFiles(outputDir string) {
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "media_001.") {
+			_ = os.Remove(filepath.Join(outputDir, name))
+		}
+	}
 }
 
 func (d BilibiliDownloader) runYTDLP(ctx context.Context, args ...string) ([]byte, error) {
@@ -970,16 +1593,48 @@ func (d BilibiliDownloader) runYTDLP(ctx context.Context, args ...string) ([]byt
 	if path == "" {
 		path = "yt-dlp"
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return nil, fmt.Errorf("yt-dlp 执行失败: %s", sanitizeYTDLPError(message))
+	runCtx := ctx
+	cancel := func() {}
+	if timeout := ytdlpCommandTimeout(); timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
 	}
-	return output, nil
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, path, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("yt-dlp 执行失败: %s", sanitizeYTDLPError(err.Error()))
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			message := strings.TrimSpace(output.String())
+			if message == "" {
+				message = err.Error()
+			}
+			if isPermanentYTDLPMessage(message) {
+				return nil, permanentYTDLPError{Message: message}
+			}
+			return nil, fmt.Errorf("yt-dlp 执行失败: %s", sanitizeYTDLPError(message))
+		}
+		return output.Bytes(), nil
+	case <-runCtx.Done():
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("yt-dlp 下载超时: 已超过 %s", ytdlpCommandTimeout())
+	}
 }
 
 func reportDownloadProgress(fn func(DownloadProgress), progress DownloadProgress) {
@@ -1178,11 +1833,22 @@ func (d BilibiliDownloader) writeAweme(ctx context.Context, outputDir string, aw
 }
 
 func (d BilibiliDownloader) downloadFile(ctx context.Context, target, path, cookie string, progress func(int64), retryNotice func(string)) error {
+	return d.downloadFileWithOptions(ctx, target, path, cookie, "", progress, retryNotice)
+}
+
+func (d BilibiliDownloader) downloadFileWithReferer(ctx context.Context, target, path, cookie, referer string) error {
+	return d.downloadFileWithOptions(ctx, target, path, cookie, referer, nil, nil)
+}
+
+func (d BilibiliDownloader) downloadFileWithOptions(ctx context.Context, target, path, cookie, referer string, progress func(int64), retryNotice func(string)) error {
 	var lastErr error
 	for attempt := 1; attempt <= bilibiliRequestAttempts; attempt++ {
 		req, err := d.newRequest(ctx, target, cookie)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(referer) != "" {
+			req.Header.Set("Referer", strings.TrimSpace(referer))
 		}
 		resp, err := d.client().Do(req)
 		if err != nil {
@@ -1566,16 +2232,25 @@ func existingAwemeIDs(dir string) (map[string]bool, error) {
 func ytdlpMaxWorks() int {
 	value := strings.TrimSpace(os.Getenv("LOCALBILIBILI_YTDLP_MAX_WORKS"))
 	if value == "" {
-		return 12
+		return 0
 	}
 	n, err := strconv.Atoi(value)
 	if err != nil || n <= 0 {
-		return 12
-	}
-	if n > 200 {
-		return 200
+		return 0
 	}
 	return n
+}
+
+func ytdlpCommandTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("LOCALBILIBILI_YTDLP_TIMEOUT_SECONDS"))
+	if value == "" {
+		return 5 * time.Minute
+	}
+	seconds, err := strconv.Atoi(value)
+	if err != nil || seconds <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func ytdlpFormat() string {
@@ -2064,9 +2739,23 @@ func isPermanentYTDLPError(err error) bool {
 	if err == nil {
 		return false
 	}
+	var permanent permanentYTDLPError
+	if errors.As(err, &permanent) {
+		return true
+	}
 	message := strings.ToLower(err.Error())
+	return isPermanentYTDLPMessage(message)
+}
+
+func isPermanentYTDLPMessage(message string) bool {
+	message = strings.ToLower(message)
 	return strings.Contains(message, "http error 403") ||
 		strings.Contains(message, "http error 404") ||
+		strings.Contains(message, "http error 412") ||
+		strings.Contains(message, "precondition failed") ||
+		strings.Contains(message, "unable to extract initial state") ||
+		(strings.Contains(message, "[bilibili]") && strings.Contains(message, "extracti")) ||
+		strings.Contains(message, "下载超时") ||
 		strings.Contains(message, "private") ||
 		strings.Contains(message, "会员") ||
 		strings.Contains(message, "付费") ||

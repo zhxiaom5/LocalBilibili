@@ -131,14 +131,28 @@ func TestUpdateQueuesCookieAndSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := NewUpdateManager(store, NewEventHub(), fakeDownloader{})
-	run, err := manager.EnqueueQueueNow(queue.ID)
+	run, err := manager.EnqueueQueueNow(queue.ID, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.QueueID != queue.ID || run.TotalCreators != 1 {
+	if run.QueueID != queue.ID || run.TotalCreators != 1 || run.TriggerSource != "manual" {
 		t.Fatalf("run = %#v", run)
 	}
 	waitFor(t, time.Second, func() bool { return !manager.Status().Running && manager.Status().PendingCreators == 0 })
+	completedRun, err := store.UpdateRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedRun.StartedAt == "" || completedRun.FinishedAt == "" || completedRun.TriggerSource != "manual" {
+		t.Fatalf("run should record timing and source: %#v", completedRun)
+	}
+	jobs, err := store.UpdateJobs(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) == 0 || jobs[0].StartedAt == "" || jobs[0].FinishedAt == "" || jobs[0].TriggerSource != "manual" {
+		t.Fatalf("job should record timing and source: %#v", jobs)
+	}
 	if err := store.SaveUpdateCookie("msToken=one; ttwid=two"); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +172,45 @@ func TestUpdateQueuesCookieAndSchedule(t *testing.T) {
 	cookie, _ = store.UpdateCookie()
 	if cookie.ValidationStatus != "valid" {
 		t.Fatalf("cookie status = %#v", cookie)
+	}
+}
+
+func TestScheduledUpdateQueueRecordsTriggerSource(t *testing.T) {
+	store := newTestStore(t)
+	dir, err := store.SaveDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, _, err := store.UpsertCreatorWithWorksWithIdentity(dir.ID, "定时UP", CreatorIdentity{UID: "uid", SecUID: "sec", ProfileURL: "https://www.bilibili.com/user/sec"}, []WorkInput{{AwemeID: "1", Title: "one", Media: []MediaInput{{Type: "image", FilePath: filepath.Join(t.TempDir(), "a.webp"), FileName: "a.webp"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue, err := store.CreateUpdateQueue("定时队列", "0 3 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddCreatorsToUpdateQueue(queue.ID, []int64{creator.ID}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewUpdateManager(store, NewEventHub(), fakeDownloader{})
+	run, err := manager.EnqueueQueueNow(queue.ID, "scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return !manager.Status().Running && manager.Status().PendingCreators == 0 })
+	completedRun, err := store.UpdateRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedRun.TriggerSource != "scheduled" {
+		t.Fatalf("run source = %#v", completedRun)
+	}
+	jobs, err := store.UpdateJobs(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) == 0 || jobs[0].TriggerSource != "scheduled" {
+		t.Fatalf("job source = %#v", jobs)
 	}
 }
 
@@ -516,7 +569,7 @@ func TestRetryUpdateJobFailureStaysOnSameRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.CreateUpdateRun(queue, 1)
+	run, err := store.CreateUpdateRun(queue, 1, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,6 +598,41 @@ func TestRetryUpdateJobFailureStaysOnSameRecord(t *testing.T) {
 	}
 	if updatedRun.TotalCreators != 1 || updatedRun.FailedCreators != 1 || updatedRun.SucceededCreators != 0 {
 		t.Fatalf("retry should not double count run failures: %#v", updatedRun)
+	}
+}
+
+func TestNewUpdateManagerFailsInterruptedJobsOnStartup(t *testing.T) {
+	store := newTestStore(t)
+	dir, err := store.SaveDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, _, err := store.UpsertCreatorWithWorksWithIdentity(dir.ID, "阿言", CreatorIdentity{SecUID: "sec", ProfileURL: "https://www.bilibili.com/user/sec"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := store.AddUpdateJobs([]int64{creator.ID}, 0, 0, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkUpdateJobRunning(jobs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewUpdateManager(store, NewEventHub(), writingDownloader{awemeID: "stale", title: "stale"})
+	defer manager.Close()
+	stale, err := store.UpdateJob(jobs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Status != "failed" || !strings.Contains(stale.Error, "服务重启后更新任务已中断") {
+		t.Fatalf("stale job = %#v", stale)
+	}
+	nextJobs, err := store.AddUpdateJobs([]int64{creator.ID}, 0, 0, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nextJobs) != 1 || nextJobs[0].ID == stale.ID || nextJobs[0].Status != "pending" {
+		t.Fatalf("next jobs = %#v stale=%#v", nextJobs, stale)
 	}
 }
 
@@ -667,6 +755,30 @@ func TestUpdateJobsPaginationDeleteAndRunningStatus(t *testing.T) {
 	if page.Page != 2 || page.PageSize != 5 || page.Total != 12 || page.TotalPages != 3 || len(page.Jobs) != 5 {
 		t.Fatalf("page = %#v", page)
 	}
+	if page.Summary.Failed != 12 || page.Summary.Pending != 0 || page.Summary.Running != 0 || page.Summary.Succeeded != 0 {
+		t.Fatalf("summary = %#v", page.Summary)
+	}
+
+	filterResp, err := client.Get(server.URL + "/api/update/jobs?page=1&page_size=50&status=failed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer filterResp.Body.Close()
+	if filterResp.StatusCode != http.StatusOK {
+		t.Fatalf("filter status = %d body=%s", filterResp.StatusCode, readBody(t, filterResp))
+	}
+	var failedPage UpdateJobsPage
+	if err := json.NewDecoder(filterResp.Body).Decode(&failedPage); err != nil {
+		t.Fatal(err)
+	}
+	if failedPage.Total != 12 || len(failedPage.Jobs) != 12 || failedPage.Summary.Failed != 12 {
+		t.Fatalf("failed page = %#v", failedPage)
+	}
+	for _, job := range failedPage.Jobs {
+		if job.Status != "failed" {
+			t.Fatalf("filtered job status = %q", job.Status)
+		}
+	}
 
 	deleteReq, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/update/jobs/"+strconvID(page.Jobs[0].ID), nil)
 	deleteResp, err := client.Do(deleteReq)
@@ -685,7 +797,7 @@ func TestUpdateJobsPaginationDeleteAndRunningStatus(t *testing.T) {
 		t.Fatalf("total after delete = %d", afterDelete.Total)
 	}
 
-	runningJobs, err := app.store.AddUpdateJobs([]int64{creator.ID}, 0, 0)
+	runningJobs, err := app.store.AddUpdateJobs([]int64{creator.ID}, 0, 0, "manual")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,6 +806,13 @@ func TestUpdateJobsPaginationDeleteAndRunningStatus(t *testing.T) {
 	}
 	if err := app.store.MarkUpdateJobRunning(runningJobs[0].ID); err != nil {
 		t.Fatal(err)
+	}
+	runningPage, err := app.store.UpdateJobsPage(1, 50, "running")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runningPage.Total != 1 || len(runningPage.Jobs) != 1 || runningPage.Summary.Running != 1 || runningPage.Summary.Failed != 11 {
+		t.Fatalf("running page = %#v", runningPage)
 	}
 	deleteRunningReq, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/update/jobs/"+strconvID(runningJobs[0].ID), nil)
 	deleteRunningResp, err := client.Do(deleteRunningReq)

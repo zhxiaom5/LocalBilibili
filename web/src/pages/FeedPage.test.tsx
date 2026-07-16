@@ -129,11 +129,19 @@ function fireTouchSwipe(viewer: Element, startY = 620, moveY = 520, endY = 500) 
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: endY }] });
 }
 
+async function openAdvancedControls(user: ReturnType<typeof userEvent.setup>) {
+  const button = await screen.findByLabelText('更多播放控制');
+  if (button.getAttribute('aria-expanded') !== 'true') {
+    await user.click(button);
+  }
+}
+
 it('re-fetches feed with the selected order and keeps the current work when possible', async () => {
   const user = userEvent.setup();
   renderPage('/creator/1');
 
   expect(await screen.findByText(/第三条/)).toBeInTheDocument();
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('播放顺序'));
 
   await waitFor(() => {
@@ -174,18 +182,23 @@ it('does not feed the current work back as a new initial work after touch naviga
 });
 
 it('cycles play order through desc asc and back to random', async () => {
+  const user = userEvent.setup();
   renderPage('/');
 
   await screen.findByText(/第三条/);
+  await openAdvancedControls(user);
   const orderButton = screen.getByLabelText('播放顺序');
   expect(orderButton).toHaveTextContent('随机');
 
   fireEvent.click(orderButton);
+  await openAdvancedControls(user);
   await waitFor(() => expect(screen.getByLabelText('播放顺序')).toHaveTextContent('倒序'));
 
   fireEvent.click(screen.getByLabelText('播放顺序'));
+  await openAdvancedControls(user);
   await waitFor(() => expect(screen.getByLabelText('播放顺序')).toHaveTextContent('顺序'));
 
   fireEvent.click(screen.getByLabelText('播放顺序'));
+  await openAdvancedControls(user);
   await waitFor(() => expect(screen.getByLabelText('播放顺序')).toHaveTextContent('随机'));
 });

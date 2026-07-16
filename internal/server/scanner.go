@@ -401,6 +401,7 @@ func scanCreatorWithIdentityAndWarnings(path string) (CreatorIdentity, []WorkInp
 					work.Title = meta.Title
 				}
 				work.Description = meta.Description
+				work.WorkType = meta.WorkType
 				work.MusicTitle = meta.MusicTitle
 				work.SourceURL = meta.SourceURL
 				work.CoverURL = meta.CoverURL
@@ -700,8 +701,11 @@ func ParseAwemeID(name string) string {
 		return ""
 	}
 	last := parts[len(parts)-1]
-	if last == "data" && len(parts) >= 2 && isDigits(parts[len(parts)-2]) {
+	if last == "data" && len(parts) >= 2 && (isBilibiliWorkID(parts[len(parts)-2]) || isDigits(parts[len(parts)-2])) {
 		return parts[len(parts)-2]
+	}
+	if isBilibiliWorkID(last) {
+		return last
 	}
 	if isDigits(last) {
 		if len(parts) >= 3 && parts[len(parts)-2] == "live" && isDigits(parts[len(parts)-3]) {
@@ -715,6 +719,14 @@ func ParseAwemeID(name string) string {
 		}
 	}
 	return ""
+}
+
+func isBilibiliWorkID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 {
+		return false
+	}
+	return strings.HasPrefix(value, "BV") || strings.HasPrefix(value, "bv")
 }
 
 func isDigits(value string) bool {
@@ -753,6 +765,7 @@ func MediaType(name string) string {
 
 type metadata struct {
 	AwemeID         string
+	WorkType        string
 	Title           string
 	Description     string
 	MusicTitle      string
@@ -767,7 +780,9 @@ type metadata struct {
 func parseMetadata(path string) metadata {
 	var raw struct {
 		AwemeID    string `json:"aweme_id"`
+		Title      string `json:"title"`
 		Desc       string `json:"desc"`
+		WorkType   string `json:"work_type"`
 		CreateTime int64  `json:"create_time"`
 		ShareURL   string `json:"share_url"`
 		Music      struct {
@@ -798,10 +813,11 @@ func parseMetadata(path string) metadata {
 	}
 	meta := metadata{
 		AwemeID:     raw.AwemeID,
-		Title:       raw.Desc,
+		Title:       firstNonEmptyLocalBilibili(raw.Title, raw.Desc),
 		Description: raw.Desc,
 		MusicTitle:  raw.Music.Title,
 		SourceURL:   raw.ShareURL,
+		WorkType:    raw.WorkType,
 		CreatorIdentity: CreatorIdentity{
 			Name:       raw.Author.Nickname,
 			UID:        raw.Author.UID,
@@ -822,7 +838,7 @@ func parseMetadata(path string) metadata {
 		meta.SourceURL = meta.CreatorIdentity.ProfileURL
 	}
 	if raw.CreateTime > 0 {
-		meta.PublishedAt = time.Unix(raw.CreateTime, 0).Format(time.RFC3339)
+		meta.PublishedAt = time.Unix(raw.CreateTime, 0).UTC().Format(time.RFC3339)
 	}
 	for _, item := range raw.TextExtra {
 		if item.HashtagName != "" {

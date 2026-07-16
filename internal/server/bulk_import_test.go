@@ -230,6 +230,40 @@ func TestBulkImportReusesOnlyWhenNameAndOnlineIdentityMatch(t *testing.T) {
 	}
 }
 
+func TestBulkImportCorrectsNearMatchEmptyCreatorIdentity(t *testing.T) {
+	store := newTestStore(t)
+	dir, err := store.SaveDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing, _, err := store.UpsertCreatorWithWorksWithIdentity(dir.ID, "二马由之的投资园地", CreatorIdentity{
+		UID:        "526351183",
+		SecUID:     "526351183",
+		ProfileURL: "https://space.bilibili.com/526351183",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	creators, err := store.ImportResolvedCreatorProfiles(dir.ID, []CreatorProfile{{
+		Name:       "二马由之投资园地",
+		UID:        "593014885",
+		SecUID:     "593014885",
+		ProfileURL: "https://space.bilibili.com/593014885",
+		Bio:        "雪球网2020年十大影响力用户",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(creators) != 1 || creators[0].ID != existing.ID {
+		t.Fatalf("near-match empty creator should be corrected in place: existing=%#v creators=%#v", existing, creators)
+	}
+	updated := creators[0]
+	if updated.Name != "二马由之投资园地" || updated.BilibiliSecUID != "593014885" || updated.BilibiliProfileURL != "https://space.bilibili.com/593014885" {
+		t.Fatalf("updated creator = %#v", updated)
+	}
+}
+
 func TestBulkImportWithoutOnlineIdentityMatchesByName(t *testing.T) {
 	store := newTestStore(t)
 	dir, err := store.SaveDirectory(t.TempDir())

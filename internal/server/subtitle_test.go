@@ -105,6 +105,93 @@ func TestSubtitleTokenForCreatorCreatesPendingRecord(t *testing.T) {
 	}
 }
 
+func TestSubtitleTextForCreatorPrefixesChaptersWithOriginalDate(t *testing.T) {
+	store := newTestStore(t)
+	root := t.TempDir()
+	creatorDir := filepath.Join(root, "阿言")
+	if err := os.Mkdir(creatorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	videoOne := filepath.Join(creatorDir, "2026-07-10_入库文件A_1001.mp4")
+	videoTwo := filepath.Join(creatorDir, "2026-07-10_入库文件B_1002.mp4")
+	if err := os.WriteFile(videoOne, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(videoTwo, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	textOne := filepath.Join(creatorDir, "2026-07-10_入库文件A_1001.txt")
+	textTwo := filepath.Join(creatorDir, "2026-07-10_入库文件B_1002.txt")
+	if err := os.WriteFile(textOne, []byte("字幕A"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(textTwo, []byte("字幕B"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := store.SaveDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator, _, err := store.UpsertCreatorWithWorks(dir.ID, "阿言", []WorkInput{
+		{
+			AwemeID:     "1001",
+			Title:       "作品A",
+			PublishedAt: "2024-05-06T07:08:09Z",
+			Media:       []MediaInput{{Type: "video", FilePath: videoOne, FileName: filepath.Base(videoOne)}},
+		},
+		{
+			AwemeID:     "1002",
+			Title:       "作品B",
+			PublishedAt: "2024-05-07T07:08:09Z",
+			Media:       []MediaInput{{Type: "video", FilePath: videoTwo, FileName: filepath.Base(videoTwo)}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	works, err := store.FeedWithOptions(FeedOptions{CreatorID: creator.ID, Order: "asc", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(works) != 2 {
+		t.Fatalf("works len = %d", len(works))
+	}
+	for _, work := range works {
+		var textPath string
+		switch work.AwemeID {
+		case "1001":
+			textPath = textOne
+		case "1002":
+			textPath = textTwo
+		default:
+			t.Fatalf("unexpected work = %#v", work)
+		}
+		if err := store.UpsertSubtitleRecord(work.ID, 0, creator.ID, textPath, "", "", "test", "ready", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token, err := store.SubtitleTokenForCreator(creator.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, ready, err := store.SubtitleTextForCreator(creator.ID, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("expected creator subtitles ready")
+	}
+	if !strings.Contains(text, "## 2024-05-06 作品A\n\n字幕A") || !strings.Contains(text, "## 2024-05-07 作品B\n\n字幕B") {
+		t.Fatalf("creator subtitle text missing original dates: %q", text)
+	}
+	if strings.Index(text, "## 2024-05-07 作品B") > strings.Index(text, "## 2024-05-06 作品A") {
+		t.Fatalf("creator subtitles should be ordered by original date desc: %q", text)
+	}
+	if strings.Contains(text, "2026-07-10 作品") {
+		t.Fatalf("creator subtitle text used import/file date instead of original published_at: %q", text)
+	}
+}
+
 func TestSubtitleManagerScanModeSkipsMissingAndUpsertsExisting(t *testing.T) {
 	store := newTestStore(t)
 	root := t.TempDir()

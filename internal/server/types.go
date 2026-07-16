@@ -145,6 +145,9 @@ type UpdateRun struct {
 	QueueID           int64     `json:"queue_id"`
 	QueueName         string    `json:"queue_name"`
 	EnqueuedAt        time.Time `json:"enqueued_at"`
+	StartedAt         string    `json:"started_at,omitempty"`
+	FinishedAt        string    `json:"finished_at,omitempty"`
+	TriggerSource     string    `json:"trigger_source"`
 	TotalCreators     int       `json:"total_creators"`
 	SucceededCreators int       `json:"succeeded_creators"`
 	FailedCreators    int       `json:"failed_creators"`
@@ -166,6 +169,7 @@ type UpdateJob struct {
 	RetryOfJobID      int64     `json:"retry_of_job_id,omitempty"`
 	Attempt           int       `json:"attempt"`
 	Status            string    `json:"status"`
+	TriggerSource     string    `json:"trigger_source"`
 	AddedWorks        int       `json:"added_works"`
 	TotalWorks        int       `json:"total_works"`
 	ProcessedWorks    int       `json:"processed_works"`
@@ -383,11 +387,20 @@ type LogEventsPage struct {
 }
 
 type UpdateJobsPage struct {
-	Jobs       []UpdateJob `json:"jobs"`
-	Page       int         `json:"page"`
-	PageSize   int         `json:"page_size"`
-	Total      int         `json:"total"`
-	TotalPages int         `json:"total_pages"`
+	Jobs       []UpdateJob       `json:"jobs"`
+	Page       int               `json:"page"`
+	PageSize   int               `json:"page_size"`
+	Total      int               `json:"total"`
+	TotalPages int               `json:"total_pages"`
+	Summary    UpdateJobsSummary `json:"summary"`
+}
+
+type UpdateJobsSummary struct {
+	Pending    int `json:"pending"`
+	Running    int `json:"running"`
+	Succeeded  int `json:"succeeded"`
+	Failed     int `json:"failed"`
+	AddedWorks int `json:"added_works"`
 }
 
 type Diagnostics struct {

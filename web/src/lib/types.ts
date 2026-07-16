@@ -150,6 +150,15 @@ export type UpdateJobsPage = {
   page_size: number;
   total: number;
   total_pages: number;
+  summary: UpdateJobsSummary;
+};
+
+export type UpdateJobsSummary = {
+  pending: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  added_works: number;
 };
 
 export type AboutInfo = {
@@ -227,6 +236,7 @@ export type UpdateJob = {
   retry_of_job_id?: number;
   attempt?: number;
   status: string;
+  trigger_source?: string;
   added_works: number;
   total_works?: number;
   processed_works?: number;

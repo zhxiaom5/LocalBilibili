@@ -16,6 +16,12 @@ func TestParseAwemeIDAndMediaType(t *testing.T) {
 	if got := ParseAwemeID(name); got != "7640372060313385727" {
 		t.Fatalf("ParseAwemeID() = %q", got)
 	}
+	if got := ParseAwemeID("2026-07-01_长视频_BV1abc_data.json"); got != "BV1abc" {
+		t.Fatalf("ParseAwemeID(BV data) = %q", got)
+	}
+	if got := ParseAwemeID("2026-07-01_长视频_BV1abc.mp4"); got != "BV1abc" {
+		t.Fatalf("ParseAwemeID(BV media) = %q", got)
+	}
 	if got := ParseTitle(name); got != "会好 7640372060313385727" {
 		t.Fatalf("ParseTitle() = %q", got)
 	}

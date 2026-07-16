@@ -510,7 +510,9 @@ test('immersive feed shows overlays and sends search query', async ({ page }) =>
   await page.goto('/');
   await expect(page.getByLabel('作品播放器')).toBeVisible();
   await page.getByLabel('作品播放器').hover();
-  await expect(page.getByLabel('搜索本地作品')).toBeVisible();
+  await expect(page.getByLabel('打开搜索')).toBeVisible();
+  await expect(page.locator('.top-meta')).toHaveCount(0);
+  await expect(page.locator('.creator-info-panel')).toBeVisible();
   await expect(page.getByLabel('作品操作')).toBeVisible();
   await expect(page.getByTitle('收藏该作品')).toBeVisible();
   await expect(page.getByTitle('收藏该作者')).toBeVisible();
@@ -518,11 +520,7 @@ test('immersive feed shows overlays and sends search query', async ({ page }) =>
   await expect(page.getByTitle('分享')).not.toBeVisible();
   await expect(page.getByTitle('音频')).not.toBeVisible();
   await expect(page.getByTitle('UP主')).not.toBeVisible();
-  await page.getByLabel('关闭悬浮').click();
-  await expect(page.getByLabel('搜索本地作品')).not.toBeVisible();
-  await expect(page.getByLabel('作品操作')).not.toBeVisible();
-  await expect(page.getByLabel('打开悬浮')).toBeVisible();
-  await page.getByLabel('打开悬浮').click();
+  await page.getByLabel('打开搜索').click();
   await expect(page.getByLabel('搜索本地作品')).toBeVisible();
   await page.getByLabel('搜索本地作品').fill('夏天');
   await page.getByRole('button', { name: /搜索/ }).click();
@@ -635,13 +633,17 @@ test('mobile feed overlays do not collide or dominate the player', async ({ page
   await page.goto('/');
   await page.getByLabel('作品播放器').click({ position: { x: 180, y: 260 } });
   await expect(page.getByLabel('打开菜单')).toBeVisible();
-  await expect(page.getByLabel('搜索本地作品')).toBeVisible();
+  await expect(page.getByLabel('打开搜索')).toBeVisible();
+  await expect(page.locator('.top-meta')).toHaveCount(0);
+  await expect(page.locator('.creator-info-panel')).toBeVisible();
   await expect(page.getByRole('link', { name: '@kkcuda1' })).toBeVisible();
   await expect(page.getByTitle('收藏该作品')).toBeVisible();
   await expect(page.getByTitle('收藏该作者')).toBeVisible();
   await expect(page.locator('.feed-viewer')).toHaveCSS('touch-action', 'none');
   await expect(page.locator('.feed-viewer')).toHaveCSS('overscroll-behavior', 'contain');
+  await page.getByLabel('更多播放控制').click();
   await expect(page.getByLabel('音量')).toHaveCSS('touch-action', 'pan-x');
+  await expect(page.getByLabel('播放速度')).toHaveCSS('touch-action', 'pan-x');
   await expect(page.getByLabel('视频进度')).toHaveCSS('touch-action', 'pan-x');
   await expect(page.getByLabel('更多播放控制')).toBeVisible();
   await expect(page.getByText('目录')).toHaveCount(0);
@@ -651,10 +653,9 @@ test('mobile feed overlays do not collide or dominate the player', async ({ page
   await expect(page.getByLabel('视频进度')).toHaveAttribute('max', '100');
   expect(await dragRangeByLabel(page, '视频进度', 0.5)).toBe('50');
   expect(await dragRangeByLabel(page, '音量', 0.75)).toBe('0.75');
-  await page.getByLabel('更多播放控制').click();
-  await expect(page.getByLabel('悬浮透明度')).toBeVisible();
-  await expect(page.getByLabel('悬浮透明度')).toHaveCSS('touch-action', 'pan-x');
-  expect(await dragRangeByLabel(page, '悬浮透明度', 0.25)).toBe('0.32');
+  expect(await dragRangeByLabel(page, '播放速度', 0.5)).toBe('1.5');
+  await expect(page.locator('video')).toHaveJSProperty('playbackRate', 1.5);
+  await expect(page.getByLabel('悬浮透明度')).toHaveCount(0);
   await expect(page.getByText(/三天三夜/)).toBeVisible();
   await expect(page.getByText('第二条移动端描述')).not.toBeVisible();
 
@@ -665,8 +666,8 @@ test('mobile feed overlays do not collide or dominate the player', async ({ page
     };
     return {
       menu: box('.mobile-nav-toggle'),
-      search: box('.feed-search'),
-      topMeta: box('.top-meta'),
+      search: box('.feed-top-actions'),
+      creatorInfo: box('.creator-info-panel'),
       rail: box('.action-rail'),
       videoControls: box('.video-controls'),
       advancedControls: box('.advanced-control-panel'),
@@ -679,8 +680,8 @@ test('mobile feed overlays do not collide or dominate the player', async ({ page
   });
 
   expect(boxes.menu.right).toBeLessThanOrEqual(boxes.search.left - 8);
-  expect(boxes.topMeta.right).toBeLessThanOrEqual(boxes.rail.left - 8);
-  expect(boxes.topMeta.height).toBeLessThanOrEqual(62);
+  expect(boxes.creatorInfo.right).toBeLessThanOrEqual(boxes.videoControls.left - 8);
+  expect(boxes.creatorInfo.height).toBeLessThanOrEqual(96);
   expect(boxes.rail.width).toBeLessThanOrEqual(52);
   expect(boxes.rail.right).toBeLessThanOrEqual(boxes.viewer.right - 6);
   expect(boxes.videoControls.height).toBeLessThanOrEqual(120);
@@ -734,6 +735,7 @@ test('hidden video overlays keep only a minimal timeline and restore control bar
   await page.getByLabel('作品播放器').hover();
   await expect(page.getByLabel('视频控制')).toBeVisible();
   await prepareMockVideoDuration(page, 100);
+  await page.getByLabel('更多播放控制').click();
   await page.getByLabel('关闭悬浮').click();
   await expect(page.getByLabel('搜索本地作品')).not.toBeVisible();
   await expect(page.getByLabel('作品操作')).not.toBeVisible();
@@ -748,6 +750,7 @@ test('hidden video overlays keep only a minimal timeline and restore control bar
 
   await page.getByLabel('打开悬浮').click();
   await expect(page.getByLabel('视频控制')).toBeVisible();
+  await page.getByLabel('更多播放控制').click();
   await expect(page.getByLabel('音量')).toBeVisible();
 });
 
@@ -853,6 +856,7 @@ test('video picture in picture control enters exits and fits viewports', async (
     await page.goto('/');
     await page.getByLabel('作品播放器').hover();
     await expect(page.getByLabel('视频控制')).toBeVisible();
+    await page.getByLabel('更多播放控制').click();
     const pipButton = page.getByLabel('画中画');
     await expect(pipButton).toBeVisible();
     const boxes = await page.evaluate(() => {

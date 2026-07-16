@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { Creator, UpdateJob, UpdateQueue } from '../lib/types';
 
+type JobStatusFilter = 'pending' | 'running' | 'succeeded' | 'failed';
+
 export function UpdatesPage() {
   const queryClient = useQueryClient();
   const [newName, setNewName] = useState('');
@@ -12,9 +14,10 @@ export function UpdatesPage() {
   const [cookieHelp, setCookieHelp] = useState(false);
   const [editingQueue, setEditingQueue] = useState<UpdateQueue | null>(null);
   const [jobPage, setJobPage] = useState(1);
+  const [jobStatusFilter, setJobStatusFilter] = useState<JobStatusFilter | ''>('');
   const [notice, setNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const status = useQuery({ queryKey: ['update-status'], queryFn: api.updateStatus, refetchInterval: 3000 });
-  const updateJobs = useQuery({ queryKey: ['update-jobs', jobPage], queryFn: () => api.updateJobs({ page: jobPage, pageSize: 10 }), refetchInterval: 5000 });
+  const updateJobs = useQuery({ queryKey: ['update-jobs', jobPage, jobStatusFilter], queryFn: () => api.updateJobs({ page: jobPage, pageSize: 10, status: jobStatusFilter || undefined }), refetchInterval: 5000 });
   const queues = useQuery({ queryKey: ['update-queues'], queryFn: api.updateQueues });
   const cookie = useQuery({ queryKey: ['update-cookie'], queryFn: api.updateCookie });
   const runtime = useQuery({ queryKey: ['runtime-config'], queryFn: api.runtimeConfig });
@@ -133,6 +136,12 @@ export function UpdatesPage() {
   });
   const runningJobs = statusValue?.running_jobs ?? [];
   const historyJobs = (updateJobs.data?.jobs && updateJobs.data.jobs.length > 0 ? updateJobs.data.jobs : statusValue?.jobs) ?? [];
+  const jobSummary = updateJobs.data?.summary;
+  const activeFilterLabel = jobStatusFilter ? formatJobStatusFilter(jobStatusFilter) : '全部状态';
+  const selectJobFilter = (filter: JobStatusFilter | '') => {
+    setJobStatusFilter(filter);
+    setJobPage(1);
+  };
 
   return (
     <div className="page updates-page">
@@ -210,10 +219,11 @@ export function UpdatesPage() {
             <span style={{ width: `${statusValue?.progress ?? 0}%` }} />
           </div>
           <div className="metric-grid">
-            <Metric label="队列中UP主" value={statusValue?.pending_creators ?? 0} />
-            <Metric label="成功UP主" value={statusValue?.succeeded_creators ?? 0} />
-            <Metric label="失败UP主" value={statusValue?.failed_creators ?? 0} />
-            <Metric label="新增作品" value={statusValue?.added_works ?? 0} />
+            <Metric label="队列中UP主" value={jobSummary?.pending ?? 0} active={jobStatusFilter === 'pending'} onClick={() => selectJobFilter('pending')} />
+            <Metric label="正在更新UP主" value={jobSummary?.running ?? 0} active={jobStatusFilter === 'running'} onClick={() => selectJobFilter('running')} />
+            <Metric label="成功UP主" value={jobSummary?.succeeded ?? 0} active={jobStatusFilter === 'succeeded'} onClick={() => selectJobFilter('succeeded')} />
+            <Metric label="失败UP主" value={jobSummary?.failed ?? 0} active={jobStatusFilter === 'failed'} onClick={() => selectJobFilter('failed')} />
+            <Metric label="新增作品" value={jobSummary?.added_works ?? 0} active={jobStatusFilter === ''} onClick={() => selectJobFilter('')} />
           </div>
           <section className="running-job-section">
             <h3>正在更新</h3>
@@ -227,7 +237,12 @@ export function UpdatesPage() {
           <section className="job-history-section">
             <div className="section-title-row">
               <h3>更新记录</h3>
-              <span>共 {updateJobs.data?.total ?? 0} 条</span>
+              <span>{activeFilterLabel} · 共 {updateJobs.data?.total ?? 0} 条</span>
+              {jobStatusFilter && (
+                <button type="button" className="tiny-button" onClick={() => selectJobFilter('')}>
+                  全部
+                </button>
+              )}
             </div>
           <div className="job-list">
             {historyJobs.map((job) => (
@@ -502,12 +517,12 @@ function QueueRow({ queue, onRun }: { queue: UpdateQueue; onRun: () => void }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value, active, onClick }: { label: string; value: number; active?: boolean; onClick?: () => void }) {
   return (
-    <div className="metric-card">
+    <button type="button" className={`metric-card${active ? ' active' : ''}`} onClick={onClick} aria-label={`按${label}过滤更新记录`} aria-pressed={active}>
       <strong>{value}</strong>
       <span>{label}</span>
-    </div>
+    </button>
   );
 }
 
@@ -553,6 +568,7 @@ function UpdateJobRow({
       <div className="job-detail">
         <span>{formatJobSummary(job)}</span>
         <small>{formatJobDetail(job)}</small>
+        <small className="job-time-line">触发 {formatTimeOrMissing(job.started_at)} · 结束 {formatTimeOrMissing(job.finished_at)} · {formatTriggerSource(job.trigger_source)}</small>
       </div>
       <div className="row-actions job-actions">
         {job.status === 'failed' && (
@@ -601,6 +617,30 @@ function formatTime(value: string) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function formatTimeOrMissing(value?: string) {
+  if (!value) return '未记录';
+  return formatTime(value);
+}
+
+function formatTriggerSource(value?: string) {
+  if (value === 'scheduled') return '定时更新';
+  if (value === 'manual') return '人工触发';
+  return '来源未记录';
+}
+
+function formatJobStatusFilter(value: JobStatusFilter) {
+  switch (value) {
+    case 'pending':
+      return '队列中';
+    case 'running':
+      return '正在更新';
+    case 'succeeded':
+      return '成功';
+    case 'failed':
+      return '失败';
+  }
 }
 
 function formatSpeed(value: number) {

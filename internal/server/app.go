@@ -1272,7 +1272,14 @@ func (a *App) handleUpdateJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, pageSize := parsePageArgs(r)
-	jobs, err := a.store.UpdateJobsPage(page, pageSize)
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	switch status {
+	case "", "pending", "running", "succeeded", "failed":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid status")
+		return
+	}
+	jobs, err := a.store.UpdateJobsPage(page, pageSize, status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1441,7 +1448,7 @@ func (a *App) handleRunUpdateQueueNow(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	run, err := a.updater.EnqueueQueueNow(id)
+	run, err := a.updater.EnqueueQueueNow(id, "manual")
 	if err != nil {
 		writeError(w, updateErrorStatus(err), err.Error())
 		return

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -222,6 +222,13 @@ function renderFeed(ui: ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
 }
 
+async function openAdvancedControls(user: ReturnType<typeof userEvent.setup>) {
+  const button = await screen.findByLabelText('更多播放控制');
+  if (button.getAttribute('aria-expanded') !== 'true') {
+    await user.click(button);
+  }
+}
+
 function installMediaSessionMock() {
   const handlers: MockMediaSession['handlers'] = {};
   const session: MockMediaSession = {
@@ -285,7 +292,7 @@ it('switches media with arrow buttons and works with keyboard and wheel', async 
   await user.click(screen.getByTitle('下一张'));
   expect(screen.getByText('2/2')).toBeInTheDocument();
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
   fireEvent.wheel(screen.getByLabelText('作品播放器'), { deltaY: -100 });
   expect(screen.getByText(/第一条/)).toBeInTheDocument();
 });
@@ -300,11 +307,11 @@ it('does not jump multiple works during one continuous wheel gesture', async () 
   fireEvent.wheel(viewer, { deltaY: 120 });
   advance(40);
   fireEvent.wheel(viewer, { deltaY: 120 });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
-  expect(screen.queryByText('第三条')).not.toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
+  expect(screen.queryByText(/第三条/)).not.toBeInTheDocument();
   advance(250);
   fireEvent.wheel(viewer, { deltaY: 120 });
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 });
 
 it('keeps one Mac trackpad inertia stream to one work switch', () => {
@@ -411,6 +418,26 @@ it('loads video metadata conservatively before the first autoplay attempt', asyn
   expect(play).toHaveBeenCalledTimes(1);
 });
 
+it('updates the displayed duration when the browser resolves it after metadata', async () => {
+  renderFeed(<FeedViewer works={works} initialWorkId={2} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+
+  Object.defineProperty(video, 'duration', { configurable: true, value: Number.POSITIVE_INFINITY });
+  await act(async () => {
+    fireEvent.loadedMetadata(video);
+    await Promise.resolve();
+  });
+  expect(screen.getByText('00:00 / 00:00')).toBeInTheDocument();
+
+  Object.defineProperty(video, 'duration', { configurable: true, value: 90 });
+  await act(async () => {
+    fireEvent.durationChange(video);
+    await Promise.resolve();
+  });
+
+  expect(screen.getByText('00:00 / 01:30')).toBeInTheDocument();
+});
+
 it('adds a playback session to video requests and reports buffering diagnostics', async () => {
   renderFeed(<FeedViewer works={works} initialWorkId={2} />);
   const video = document.querySelector('video') as HTMLVideoElement;
@@ -493,8 +520,8 @@ it('renders the initial work synchronously without loading the first random work
   const srcURL = new URL(video.getAttribute('src') ?? '', window.location.origin);
   expect(srcURL.pathname).toBe('/target.mp4');
   expect(srcURL.searchParams.get('play_session_id')).toMatch(/^m31-/);
-  expect(screen.getByText('目标视频')).toBeInTheDocument();
-  expect(screen.queryByText('不该先加载的视频')).not.toBeInTheDocument();
+  expect(screen.getByText(/目标视频/)).toBeInTheDocument();
+  expect(screen.queryByText(/不该先加载的视频/)).not.toBeInTheDocument();
 });
 
 it('does not retry video playback when volume or mute changes', async () => {
@@ -507,11 +534,28 @@ it('does not retry video playback when volume or mute changes', async () => {
   fireEvent.loadedMetadata(video);
   expect(play).toHaveBeenCalledTimes(1);
 
+  await user.click(screen.getByLabelText('更多播放控制'));
   fireEvent.change(screen.getByLabelText('音量'), { target: { value: '0.35' } });
   expect(play).toHaveBeenCalledTimes(1);
 
-  await user.click(screen.getByTitle('静音'));
+  await user.click(within(screen.getByLabelText('高级播放控制')).getByTitle('静音'));
   expect(play).toHaveBeenCalledTimes(1);
+});
+
+it('toggles mute from the right action rail with the current state icon', async () => {
+  const user = userEvent.setup();
+  renderFeed(<FeedViewer works={works} initialWorkId={2} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+
+  expect(video.muted).toBe(true);
+  const rail = screen.getByLabelText('作品操作');
+  await user.click(within(rail).getByLabelText('取消静音'));
+  expect(video.muted).toBe(false);
+  expect(within(rail).getByLabelText('静音')).toBeInTheDocument();
+
+  await user.click(within(rail).getByLabelText('静音'));
+  expect(video.muted).toBe(true);
+  expect(within(rail).getByLabelText('取消静音')).toBeInTheDocument();
 });
 
 it('stops showing loading when a video fails to load', async () => {
@@ -557,6 +601,7 @@ it('activates overlay on hover and submits search', async () => {
   expect(viewer).not.toHaveClass('overlay-active');
   fireEvent.mouseMove(viewer!);
   expect(viewer).toHaveClass('overlay-active');
+  await user.click(screen.getByLabelText('打开搜索'));
   await user.type(screen.getByLabelText('搜索本地作品'), '夏天');
   await user.click(screen.getByTitle('搜索'));
   expect(onSearch).toHaveBeenCalledWith('夏天');
@@ -565,6 +610,8 @@ it('activates overlay on hover and submits search', async () => {
 it('can hide and restore floating overlays', async () => {
   const user = userEvent.setup();
   const { container } = renderFeed(<FeedViewer works={works} />);
+  await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('关闭悬浮'));
   const viewer = container.querySelector('.feed-viewer')!;
   expect(viewer).toHaveClass('overlay-pinned-hidden');
@@ -574,7 +621,7 @@ it('can hide and restore floating overlays', async () => {
   expect(screen.getByLabelText('打开悬浮')).toBeInTheDocument();
   await user.click(screen.getByLabelText('打开悬浮'));
   expect(viewer).not.toHaveClass('overlay-pinned-hidden');
-  expect(screen.getByLabelText('搜索本地作品')).toBeInTheDocument();
+  expect(screen.getByLabelText('打开搜索')).toBeInTheDocument();
   expect(screen.getByLabelText('作品操作')).toBeInTheDocument();
 });
 
@@ -585,6 +632,7 @@ it('keeps a minimal draggable timeline when video overlays are hidden', async ()
   const video = document.querySelector('video') as HTMLVideoElement;
   Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
   fireEvent.loadedMetadata(video);
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('关闭悬浮'));
 
   const viewer = container.querySelector('.feed-viewer')!;
@@ -592,7 +640,6 @@ it('keeps a minimal draggable timeline when video overlays are hidden', async ()
   expect(screen.queryByLabelText('搜索本地作品')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('作品操作')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('音量')).not.toBeInTheDocument();
-  expect(screen.queryByLabelText('悬浮透明度')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('网页全屏')).not.toBeInTheDocument();
 
   const minimalTimeline = screen.getByLabelText('视频极简进度');
@@ -603,14 +650,19 @@ it('keeps a minimal draggable timeline when video overlays are hidden', async ()
 
   await user.click(screen.getByLabelText('打开悬浮'));
   expect(screen.getByLabelText('视频进度')).toBeInTheDocument();
+  await user.click(screen.getByLabelText('更多播放控制'));
   expect(screen.getByLabelText('音量')).toBeInTheDocument();
 });
 
 it('restores media arrows after hiding floating overlays', async () => {
   const user = userEvent.setup();
   renderFeed(<FeedViewer works={works} />);
+  await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('关闭悬浮'));
   await user.click(screen.getByLabelText('打开悬浮'));
+  expect(screen.getByLabelText('打开搜索')).toBeInTheDocument();
+  await user.keyboard('{ArrowUp}');
   await user.click(screen.getByTitle('下一张'));
   expect(screen.getByText('2/2')).toBeInTheDocument();
 });
@@ -625,10 +677,38 @@ it('updates video timeline and volume controls', async () => {
   const timeline = screen.getByLabelText('视频进度');
   fireEvent.change(timeline, { target: { value: '42' } });
   expect(video.currentTime).toBe(42);
+  await user.click(screen.getByLabelText('更多播放控制'));
   fireEvent.change(screen.getByLabelText('音量'), { target: { value: '0.35' } });
   expect(video.volume).toBe(0.35);
-  await user.click(screen.getByTitle('静音'));
+  await user.click(within(screen.getByLabelText('高级播放控制')).getByTitle('静音'));
   expect(video.muted).toBe(true);
+});
+
+it('updates, persists, and reapplies playback speed for video works', async () => {
+  const user = userEvent.setup();
+  renderFeed(<FeedViewer works={backgroundVideoWorks} initialWorkId={31} />);
+  const video = document.querySelector('video') as HTMLVideoElement;
+  expect(video.playbackRate).toBe(1);
+
+  await openAdvancedControls(user);
+  const speed = screen.getByLabelText('播放速度');
+  fireEvent.change(speed, { target: { value: '1.3' } });
+  expect(video.playbackRate).toBe(1.3);
+  expect(speed).toHaveValue('1.3');
+  expect(window.localStorage.getItem('localbilibili.playbackRate')).toBe('1.3');
+
+  await user.keyboard('{ArrowDown}');
+  expect((document.querySelector('video') as HTMLVideoElement).playbackRate).toBe(1.3);
+});
+
+it('restores the saved playback speed and omits it for image works', async () => {
+  window.localStorage.setItem('localbilibili.playbackRate', '1.6');
+  const { unmount } = renderFeed(<FeedViewer works={works} initialWorkId={2} />);
+  expect((document.querySelector('video') as HTMLVideoElement).playbackRate).toBe(1.6);
+  unmount();
+
+  renderFeed(<FeedViewer works={works} initialWorkId={1} />);
+  expect(screen.queryByLabelText('播放速度')).not.toBeInTheDocument();
 });
 
 it('updates player range controls continuously during touch-like pointer dragging', async () => {
@@ -642,30 +722,31 @@ it('updates player range controls continuously during touch-like pointer draggin
   mockRangeRect(timeline);
   firePointerRangeDrag(timeline, 20, 120);
   expect(video.currentTime).toBe(60);
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
 
+  await user.click(screen.getByLabelText('更多播放控制'));
   const volume = screen.getByLabelText('音量');
   mockRangeRect(volume);
   fireTouchRangeDrag(volume, 20, 170);
   expect(volume).toHaveValue('0.75');
   expect(video.volume).toBe(0.75);
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
 
-  const opacity = screen.getByLabelText('悬浮透明度');
-  mockRangeRect(opacity);
-  firePointerRangeDrag(opacity, 20, 70);
-  expect(opacity).toHaveValue('0.32');
-  expect(container.querySelector('.feed-viewer')).toHaveStyle({ '--overlay-alpha': '0.32' });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  const speed = screen.getByLabelText('播放速度');
+  mockRangeRect(speed);
+  fireTouchRangeDrag(speed, 20, 120);
+  expect(speed).toHaveValue('1.5');
+  expect(video.playbackRate).toBe(1.5);
 
   const viewer = screen.getByLabelText('作品播放器').closest('.feed-viewer')!;
   fireTouchSwipe(viewer, 500, 360, 340);
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 
   await user.keyboard('{ArrowUp}');
   const restoredVideo = document.querySelector('video') as HTMLVideoElement;
   Object.defineProperty(restoredVideo, 'duration', { configurable: true, value: 120 });
   fireEvent.loadedMetadata(restoredVideo);
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('关闭悬浮'));
   const minimalTimeline = screen.getByLabelText('视频极简进度');
   mockRangeRect(minimalTimeline);
@@ -679,6 +760,7 @@ it('toggles autoplay next and persists the preference', async () => {
   renderFeed(<FeedViewer works={works} />);
   await user.keyboard('{ArrowDown}');
   const video = document.querySelector('video') as HTMLVideoElement;
+  await openAdvancedControls(user);
   expect(video).toHaveAttribute('loop');
   expect(screen.getByLabelText('自动连播')).toHaveTextContent('单作品循环');
 
@@ -693,20 +775,22 @@ it('keeps the current video looping when autoplay next is disabled while manual 
   renderFeed(<FeedViewer works={works} />);
   await user.keyboard('{ArrowDown}');
   const video = document.querySelector('video') as HTMLVideoElement;
+  await openAdvancedControls(user);
   expect(video).toHaveAttribute('loop');
 
   fireEvent.ended(video);
-  expect(screen.getByText('第二条')).toBeInTheDocument();
-  expect(screen.queryByText('第三条')).not.toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
+  expect(screen.queryByText(/第三条/)).not.toBeInTheDocument();
 
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 });
 
 it('moves to the next work when autoplay next is enabled and the video ends', async () => {
   const user = userEvent.setup();
   renderFeed(<FeedViewer works={works} />);
   await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('自动连播'));
   const video = document.querySelector('video') as HTMLVideoElement;
   Object.defineProperty(video, 'duration', { configurable: true, value: 8 });
@@ -715,7 +799,7 @@ it('moves to the next work when autoplay next is enabled and the video ends', as
   fireEvent.playing(video);
   await new Promise((resolve) => window.setTimeout(resolve, 1250));
   fireEvent.ended(video);
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 });
 
 it('does not auto-advance videos that have not loaded metadata', async () => {
@@ -729,6 +813,7 @@ it('does not auto-advance videos that have not loaded metadata', async () => {
     media: [{ id: 200 + id, work_id: id, type: 'video' as const, file_name: `${id}.mp4`, url: `/${id}.mp4`, ordinal: 0 }],
   }));
   renderFeed(<FeedViewer works={videoWorks} initialWorkId={1} />);
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('自动连播'));
   const video = document.querySelector('video') as HTMLVideoElement;
   Object.defineProperty(video, 'duration', { configurable: true, value: 8 });
@@ -736,8 +821,8 @@ it('does not auto-advance videos that have not loaded metadata', async () => {
   fireEvent.playing(video);
   await new Promise((resolve) => window.setTimeout(resolve, 1250));
   fireEvent.ended(video);
-  expect(screen.getByText('视频1')).toBeInTheDocument();
-  expect(screen.queryByText('视频2')).not.toBeInTheDocument();
+  expect(screen.getByText(/视频1/)).toBeInTheDocument();
+  expect(screen.queryByText(/视频2/)).not.toBeInTheDocument();
 });
 
 it('releases the previous video request when switching to another video', async () => {
@@ -762,7 +847,7 @@ it('releases the previous video request when switching to another video', async 
   expect(removeAttributeSpy).toHaveBeenCalledWith('src');
   expect(loadSpy).toHaveBeenCalledTimes(1);
   expect(document.querySelector('video')).not.toBe(firstVideo);
-  expect(screen.getByText('释放视频2')).toBeInTheDocument();
+  expect(screen.getByText(/释放视频2/)).toBeInTheDocument();
 });
 
 it('ignores stale ended events after a manual feed navigation', async () => {
@@ -776,14 +861,15 @@ it('ignores stale ended events after a manual feed navigation', async () => {
     media: [{ id: 100 + id, work_id: id, type: 'video' as const, file_name: `${id}.mp4`, url: `/${id}.mp4`, ordinal: 0 }],
   }));
   renderFeed(<FeedViewer works={videoWorks} initialWorkId={2} />);
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('自动连播'));
   const video = document.querySelector('video') as HTMLVideoElement;
 
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByText('视频3')).toBeInTheDocument();
+  expect(screen.getByText(/视频3/)).toBeInTheDocument();
   fireEvent.ended(video);
-  expect(screen.getByText('视频3')).toBeInTheDocument();
-  expect(screen.queryByText('视频4')).not.toBeInTheDocument();
+  expect(screen.getByText(/视频3/)).toBeInTheDocument();
+  expect(screen.queryByText(/视频4/)).not.toBeInTheDocument();
 });
 
 it('requests the next play order when the order button is clicked', async () => {
@@ -791,6 +877,7 @@ it('requests the next play order when the order button is clicked', async () => 
   const onOrderChange = vi.fn();
   renderFeed(<FeedViewer works={works} order="random" onOrderChange={onOrderChange} />);
   await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   const orderButton = screen.getByLabelText('播放顺序');
   expect(orderButton).toHaveTextContent('随机');
   await user.click(orderButton);
@@ -804,6 +891,7 @@ it('enables background audio from the video controls and persists the setting', 
   const video = document.querySelector('video') as HTMLVideoElement;
   const playSpy = vi.spyOn(video, 'play').mockResolvedValue(undefined);
 
+  await openAdvancedControls(user);
   const backgroundButton = screen.getByLabelText('后台播放');
   await user.click(backgroundButton);
 
@@ -829,6 +917,7 @@ it('wires media session actions to player controls while background audio is ena
   const pauseSpy = vi.spyOn(video, 'pause');
   Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
 
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('后台播放'));
   act(() => {
     session.handlers.pause?.({ action: 'pause' });
@@ -850,13 +939,13 @@ it('wires media session actions to player controls while background audio is ena
   act(() => {
     session.handlers.nexttrack?.({ action: 'nexttrack' });
   });
-  expect(screen.getByText('后台视频二')).toBeInTheDocument();
+  expect(screen.getByText(/后台视频二/)).toBeInTheDocument();
   expect(session.metadata?.title).toBe('后台视频二');
 
   act(() => {
     session.handlers.previoustrack?.({ action: 'previoustrack' });
   });
-  expect(screen.getByText('后台视频一')).toBeInTheDocument();
+  expect(screen.getByText(/后台视频一/)).toBeInTheDocument();
 });
 
 it('cleans media session metadata when leaving video or unmounting', async () => {
@@ -864,6 +953,7 @@ it('cleans media session metadata when leaving video or unmounting', async () =>
   const session = installMediaSessionMock();
   const { unmount } = renderFeed(<FeedViewer works={backgroundVideoWorks} initialWorkId={32} />);
 
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('后台播放'));
   expect(session.metadata?.title).toBe('后台视频二');
 
@@ -887,6 +977,7 @@ it('falls back to audible playback when media session is unavailable', async () 
   const video = document.querySelector('video') as HTMLVideoElement;
   const playSpy = vi.spyOn(video, 'play').mockResolvedValue(undefined);
 
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('后台播放'));
 
   expect(video.muted).toBe(false);
@@ -901,6 +992,7 @@ it('enters and exits picture in picture from the video controls', async () => {
   const video = document.querySelector('video') as HTMLVideoElement;
   const playSpy = vi.spyOn(video, 'play').mockResolvedValue(undefined);
 
+  await openAdvancedControls(user);
   const pipButton = await screen.findByLabelText('画中画');
   await user.click(pipButton);
 
@@ -920,6 +1012,7 @@ it('keeps picture in picture visible with a clear notice when the browser does n
   installPictureInPictureMock({ enabled: false });
   renderFeed(<FeedViewer works={backgroundVideoWorks} initialWorkId={31} />);
 
+  await openAdvancedControls(user);
   const pipButton = await screen.findByLabelText('画中画');
   expect(pipButton).toBeInTheDocument();
   await user.click(pipButton);
@@ -933,12 +1026,14 @@ it('cleans picture in picture state when leaving video or unmounting', async () 
   const pip = installPictureInPictureMock();
   const { unmount } = renderFeed(<FeedViewer works={backgroundVideoWorks} initialWorkId={31} />);
 
+  await openAdvancedControls(user);
   await user.click(await screen.findByLabelText('画中画'));
   expect(pip.getElement()).toBe(document.querySelector('video'));
   await user.keyboard('{ArrowDown}');
-  expect(screen.getByText('后台视频二')).toBeInTheDocument();
+  expect(screen.getByText(/后台视频二/)).toBeInTheDocument();
   expect(pip.exitPictureInPicture).toHaveBeenCalledTimes(1);
 
+  await openAdvancedControls(user);
   await user.click(await screen.findByLabelText('画中画'));
   unmount();
   expect(pip.exitPictureInPicture).toHaveBeenCalledTimes(2);
@@ -951,11 +1046,12 @@ it('keeps playback controls usable when picture in picture is rejected', async (
   const video = document.querySelector('video') as HTMLVideoElement;
   vi.spyOn(video, 'play').mockResolvedValue(undefined);
 
+  await openAdvancedControls(user);
   await user.click(await screen.findByLabelText('画中画'));
 
   expect(await screen.findByText('画中画不可用')).toBeInTheDocument();
   expect(screen.getByLabelText('画中画')).not.toHaveClass('active-toggle');
-  expect(screen.getByTitle('暂停')).toBeInTheDocument();
+  expect(screen.getByLabelText('视频进度')).toBeInTheDocument();
 });
 
 it('shows overlays when video pauses', async () => {
@@ -976,6 +1072,8 @@ it('toggles page fullscreen and calls native fullscreen api', async () => {
   Object.defineProperty(document, 'exitFullscreen', { configurable: true, value: exitFullscreen });
   const { container } = renderFeed(<FeedViewer works={works} />);
   const viewer = container.querySelector('.feed-viewer')!;
+  await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   await user.click(screen.getByLabelText('网页全屏'));
   expect(viewer).toHaveClass('page-fullscreen');
   await user.click(screen.getByLabelText('退出网页全屏'));
@@ -996,6 +1094,7 @@ it('falls back to iOS video fullscreen when native fullscreen api is unavailable
 
   renderFeed(<FeedViewer works={works} />);
   await user.keyboard('{ArrowDown}');
+  await openAdvancedControls(user);
   await user.click(await screen.findByLabelText('完整全屏'));
   expect(webkitEnterFullscreen).toHaveBeenCalledTimes(1);
 });
@@ -1005,16 +1104,16 @@ it('shows empty state without works', () => {
   expect(screen.getByText(/还没有作品/)).toBeInTheDocument();
 });
 
-it('deduplicates lower-left metadata and links top creator with work title', () => {
+it('shows creator and work details in the bottom metadata panel', () => {
   const { container } = renderFeed(<FeedViewer works={works} />);
-  expect(container.querySelector('.meta-card')).not.toBeInTheDocument();
+  expect(container.querySelector('.top-meta')).not.toBeInTheDocument();
+  expect(container.querySelector('.creator-info-panel')).toBeInTheDocument();
   expect(screen.getByRole('link', { name: '@阿言' })).toHaveAttribute('href', '/creator/1');
-  expect(screen.getByRole('link', { name: '@阿言2' })).toHaveAttribute('href', '/creator/2');
-  expect(container.querySelector('.top-work-title')).toHaveTextContent('第一条');
+  expect(container.querySelector('.bottom-summary')).toHaveTextContent('日期未知 · 第一条');
   expect(screen.queryByText(/♪ 音乐/)).not.toBeInTheDocument();
 });
 
-it('shows publish date, title, and original source link in the top work meta', () => {
+it('shows publish date, title, and original source link in the bottom work meta', () => {
   const datedWorks = [
     {
       ...works[0],
@@ -1023,9 +1122,8 @@ it('shows publish date, title, and original source link in the top work meta', (
     },
   ];
   const { container } = renderFeed(<FeedViewer works={datedWorks} />);
-  const meta = container.querySelector('.top-work-meta')!;
-  expect(meta.querySelector('.top-work-date')).toHaveTextContent('2026-03-10');
-  expect(meta.querySelector('.top-work-title')).toHaveTextContent('第一条');
+  const meta = container.querySelector('.bottom-summary')!;
+  expect(meta).toHaveTextContent('2026-03-10 · 第一条');
   expect(meta).not.toHaveTextContent('3月10日');
   const sourceLink = screen.getByRole('link', { name: '原链接' });
   expect(sourceLink).toHaveAttribute('href', 'https://www.bilibili.com/video/BV1source');
@@ -1033,7 +1131,7 @@ it('shows publish date, title, and original source link in the top work meta', (
   expect(sourceLink).toHaveAttribute('rel', 'noreferrer');
 });
 
-it('hides invalid publish dates without breaking the top work meta', () => {
+it('falls back invalid publish dates without breaking the bottom work meta', () => {
   const invalidDateWorks = [
     {
       ...works[0],
@@ -1041,14 +1139,13 @@ it('hides invalid publish dates without breaking the top work meta', () => {
     },
   ];
   const { container } = renderFeed(<FeedViewer works={invalidDateWorks} />);
-  const meta = container.querySelector('.top-work-meta')!;
-  expect(meta.querySelector('.top-work-date')).toHaveTextContent('日期未知');
-  expect(meta.querySelector('.top-work-title')).toHaveTextContent('第一条');
+  const meta = container.querySelector('.bottom-summary')!;
+  expect(meta).toHaveTextContent('日期未知 · 第一条');
   expect(meta).not.toHaveTextContent('Invalid Date');
   expect(screen.queryByRole('link', { name: '原链接' })).not.toBeInTheDocument();
 });
 
-it('keeps top creator name and long work title in one truncating row', () => {
+it('keeps bottom creator name and long work title in the metadata panel', () => {
   const longNameWorks = [
     {
       ...works[0],
@@ -1057,16 +1154,15 @@ it('keeps top creator name and long work title in one truncating row', () => {
     },
   ];
   const { container } = renderFeed(<FeedViewer works={longNameWorks} />);
-  const primary = container.querySelector('.top-meta-primary')!;
-  const creator = primary.querySelector('.top-creator-link')!;
-  const meta = primary.querySelector('.top-work-meta')!;
-  const title = meta.querySelector('.top-work-title')!;
+  const primary = container.querySelector('.creator-info-panel')!;
+  const creator = primary.querySelector('.bottom-creator-link')!;
+  const meta = primary.querySelector('.bottom-summary')!;
   expect(creator).toHaveTextContent('@自律的小屁孩很长很长很长的名字');
-  expect(title).toHaveTextContent('当初以为的再次见');
-  expect(Array.from(primary.children)).toEqual([creator, meta]);
+  expect(meta).toHaveTextContent('当初以为的再次见');
+  expect(Array.from(primary.children).slice(0, 2)).toEqual([creator, meta]);
 });
 
-it('falls back when the top creator avatar image fails', () => {
+it('falls back when the bottom creator avatar image fails', () => {
   const avatarWorks = [
     {
       ...works[0],
@@ -1074,10 +1170,30 @@ it('falls back when the top creator avatar image fails', () => {
     },
   ];
   renderFeed(<FeedViewer works={avatarWorks} />);
-  const avatar = document.querySelector('.top-creator-avatar') as HTMLImageElement;
+  const avatar = document.querySelector('.creator-avatar-mini') as HTMLImageElement;
   expect(avatar.tagName).toBe('IMG');
   fireEvent.error(avatar);
-  expect(document.querySelector('.top-creator-avatar.fallback')).toHaveTextContent('阿');
+  expect(document.querySelector('.creator-avatar-mini.fallback')).toHaveTextContent('阿');
+});
+
+it('opens search from a compact top-right button and submits search', async () => {
+  const user = userEvent.setup();
+  const onSearch = vi.fn();
+  renderFeed(<FeedViewer works={works} onSearch={onSearch} />);
+  expect(screen.queryByLabelText('搜索本地作品')).not.toBeInTheDocument();
+  await user.click(screen.getByLabelText('打开搜索'));
+  const search = screen.getByLabelText('搜索本地作品');
+  await user.type(search, '白皮大肌');
+  await user.click(screen.getByRole('button', { name: '搜索' }));
+  expect(onSearch).toHaveBeenCalledWith('白皮大肌');
+});
+
+it('expands linked creators from the bottom metadata panel', async () => {
+  const user = userEvent.setup();
+  renderFeed(<FeedViewer works={works} />);
+  expect(screen.queryByRole('link', { name: '@阿言2' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '展开' }));
+  expect(screen.getByRole('link', { name: '@阿言2' })).toHaveAttribute('href', '/creator/2');
 });
 
 it('keeps only compact favorite actions on the right rail and opens folders from the main buttons', async () => {
@@ -1106,7 +1222,7 @@ it('collapses advanced playback controls behind the more button and closes the p
   expect(controls).toHaveClass('mobile-controls-expanded');
   expect(screen.getByLabelText('自动连播')).toBeInTheDocument();
   expect(screen.getByLabelText('播放顺序')).toBeInTheDocument();
-  expect(screen.getByLabelText('悬浮透明度')).toBeInTheDocument();
+  expect(screen.queryByLabelText('悬浮透明度')).not.toBeInTheDocument();
 
   await user.keyboard('{Escape}');
   expect(controls).not.toHaveClass('mobile-controls-expanded');
@@ -1117,34 +1233,16 @@ it('collapses advanced playback controls behind the more button and closes the p
   expect(controls).not.toHaveClass('mobile-controls-expanded');
 });
 
-it('persists overlay opacity from the control slider', () => {
-  const { container } = renderFeed(<FeedViewer works={works} />);
-  const slider = screen.getByLabelText('悬浮透明度');
-  fireEvent.change(slider, { target: { value: '0.24' } });
-  expect(container.querySelector('.feed-viewer')).toHaveStyle({ '--overlay-alpha': '0.24' });
-  expect(window.localStorage.getItem('localbilibili.overlayOpacity')).toBe('0.24');
-});
-
 it('does not switch works when touch dragging the volume range control', () => {
   renderFeed(<FeedViewer works={works} initialWorkId={2} />);
+  fireEvent.click(screen.getByLabelText('更多播放控制'));
   const volume = screen.getByLabelText('音量');
   fireEvent.touchStart(volume, { touches: [{ clientY: 500, clientX: 60 }] });
   fireEvent.touchMove(volume, { touches: [{ clientY: 180, clientX: 160 }] });
   fireEvent.touchEnd(volume, { changedTouches: [{ clientY: 180, clientX: 160 }] });
   fireEvent.change(volume, { target: { value: '0.35' } });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
   expect(volume).toHaveValue('0.35');
-});
-
-it('does not switch works when touch dragging the opacity range control', () => {
-  const { container } = renderFeed(<FeedViewer works={works} initialWorkId={2} />);
-  const opacity = screen.getByLabelText('悬浮透明度');
-  fireEvent.pointerDown(opacity, { pointerType: 'touch', clientY: 500, clientX: 60 });
-  fireEvent.pointerMove(opacity, { pointerType: 'touch', clientY: 180, clientX: 160 });
-  fireEvent.pointerUp(opacity, { pointerType: 'touch', clientY: 180, clientX: 160 });
-  fireEvent.change(opacity, { target: { value: '0.24' } });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
-  expect(container.querySelector('.feed-viewer')).toHaveStyle({ '--overlay-alpha': '0.24' });
 });
 
 it('switches one work per touch gesture', () => {
@@ -1152,7 +1250,7 @@ it('switches one work per touch gesture', () => {
   const viewer = screen.getByLabelText('作品播放器').closest('.feed-viewer')!;
   fireEvent.touchStart(viewer, { touches: [{ clientY: 500 }] });
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 360 }] });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
 });
 
 it('allows a second independent touch gesture to switch again', () => {
@@ -1162,7 +1260,7 @@ it('allows a second independent touch gesture to switch again', () => {
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 360 }] });
   fireEvent.touchStart(viewer, { touches: [{ clientY: 500 }] });
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 360 }] });
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 });
 
 it('allows rapid independent touch swipes immediately after touchmove consumed the previous swipe', () => {
@@ -1189,8 +1287,8 @@ it('switches only one work during a long touch gesture with repeated move events
   fireEvent.touchMove(viewer, { touches: [{ clientY: 360 }] });
   fireEvent.touchMove(viewer, { touches: [{ clientY: 180 }] });
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 120 }] });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
-  expect(screen.queryByText('第三条')).not.toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
+  expect(screen.queryByText(/第三条/)).not.toBeInTheDocument();
 });
 
 it('suppresses synthetic wheel events during and shortly after a touch gesture', () => {
@@ -1201,8 +1299,8 @@ it('suppresses synthetic wheel events during and shortly after a touch gesture',
   fireEvent.wheel(viewer, { deltaY: 240 });
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 180 }] });
   fireEvent.wheel(viewer, { deltaY: 240 });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
-  expect(screen.queryByText('第三条')).not.toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
+  expect(screen.queryByText(/第三条/)).not.toBeInTheDocument();
 });
 
 it('allows a new touch swipe immediately after suppressed synthetic wheel momentum', () => {
@@ -1221,13 +1319,13 @@ it('starts a fresh touch gesture even while old wheel state is still cooling dow
   renderFeed(<FeedViewer works={works} />);
   const viewer = screen.getByLabelText('作品播放器').closest('.feed-viewer')!;
   fireEvent.wheel(viewer, { deltaY: 120 });
-  expect(screen.getByText('第二条')).toBeInTheDocument();
+  expect(screen.getByText(/第二条/)).toBeInTheDocument();
   act(() => {
     vi.advanceTimersByTime(200);
   });
   fireEvent.touchStart(viewer, { touches: [{ clientY: 500 }] });
   fireEvent.touchEnd(viewer, { changedTouches: [{ clientY: 360 }] });
-  expect(screen.getByText('第三条')).toBeInTheDocument();
+  expect(screen.getByText(/第三条/)).toBeInTheDocument();
 });
 
 it('treats rapid touch pointer lifecycles as independent swipes', () => {
@@ -1270,6 +1368,7 @@ it('does not double consume one physical swipe when pointer and touch events are
 
 it('does not switch works from interactive controls', () => {
   renderFeed(<FeedViewer works={works} />);
+  fireEvent.click(screen.getByLabelText('打开搜索'));
   const search = screen.getByLabelText('搜索本地作品');
   fireEvent.wheel(search, { deltaY: 120 });
   fireEvent.touchStart(search, { touches: [{ clientY: 500 }] });

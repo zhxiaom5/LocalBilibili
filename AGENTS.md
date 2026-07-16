@@ -107,30 +107,28 @@ LocalBilibili V1 只保存、扫描、导入、展示以下 B站作品类型：
 <safe_name>__mid_<mid>/
 ```
 
-每个作品一个目录：
+默认且必须按 UP主目录内同一前缀平铺保存作品。新下载、新导入、新测试样例和新文档不得为单个作品创建子目录：
 
 ```text
-<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>/
+<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>.<ext>
 ```
 
-作品目录内文件约定：
+同一作品相关文件必须共享同一前缀：
 
 ```text
-metadata.localbilibili.json
-source.ytdlp.json
-source.bilibili.json
-media_001.mp4
-image_001.<ext>
-cover.<ext>
+<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>.mp4
+<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>_1.<image-ext>
+<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>_2.<image-ext>
+<YYYY-MM-DD>_<safe_title>_<bvid-or-dynamicid>_data.json
 ```
 
 规则：
 
-- `metadata.localbilibili.json` 是扫描器的规范输入，必须优先于文件名解析。
-- `source.ytdlp.json` 或 `source.bilibili.json` 只能保存脱敏后的原始来源数据。
-- 长视频和短视频使用 `media_001.mp4` 或等价可播放视频文件。
-- 图文使用 `image_001.<ext>`、`image_002.<ext>` 递增保存。
-- 封面使用 `cover.<ext>`。
+- `_data.json` 是扫描器的规范输入，必须优先于文件名解析。
+- 长视频和短视频使用同前缀 `.mp4` 或等价可播放视频文件。
+- 图文使用同前缀 `_1.<ext>`、`_2.<ext>` 递增保存。
+- 新下载最终产物不得使用 `media_001.*`、`metadata.localbilibili.json`、`source.ytdlp.json` 或作品子目录作为规范输出；这些只允许作为下载过程中的临时文件或历史兼容输入。
+- 扫描器可以兼容历史 `metadata.localbilibili.json` 作品子目录，但这是只读兼容路径，不得作为新功能、新下载器或测试 case 的默认输出格式。
 - 不得提交下载的视频、图片、Cookie、Token、个人会话、私密 URL 或未脱敏原始响应。
 - `.gitignore` 必须覆盖样例下载目录、数据库、配置文件、日志和构建产物。
 

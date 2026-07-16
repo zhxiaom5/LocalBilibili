@@ -260,6 +260,17 @@ async function hasVisibleText(scope, labels) {
   return false;
 }
 
+async function waitForVisibleText(page, labels, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await hasVisibleText(page, labels)) {
+      return true;
+    }
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+
 async function currentDialog(page, titlePattern) {
   const dialog = await findDialog(page, titlePattern);
   if (dialog) {
@@ -323,8 +334,7 @@ async function openAppCenter(page, timeoutMs) {
   const appCenterLabels = textLabels('FNOS_APP_CENTER_TEXT', /^应用中心$|App Center/i);
   if (await clickFirstVisible(page, appCenterLabels, timeoutMs)) {
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(1000);
-    if (await hasVisibleText(page, manualInstallLabels)) {
+    if (await waitForVisibleText(page, manualInstallLabels, Math.min(timeoutMs, 60000))) {
       await logStep(page, 'app-center-opened-by-icon');
       return;
     }
@@ -337,8 +347,7 @@ async function openAppCenter(page, timeoutMs) {
 
   if (await clickFirstVisible(page, appCenterLabels, timeoutMs)) {
     await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(1000);
-    if (await hasVisibleText(page, manualInstallLabels)) {
+    if (await waitForVisibleText(page, manualInstallLabels, Math.min(timeoutMs, 60000))) {
       await logStep(page, 'app-center-opened-by-home-retry');
       return;
     }
