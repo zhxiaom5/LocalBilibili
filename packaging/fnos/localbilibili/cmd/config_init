@@ -1,0 +1,10 @@
+#!/bin/bash
+set -uo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_ROOT="${TRIM_APPDEST:-$SCRIPT_ROOT/app}"
+VAR_DIR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+TMP_DIR="${TRIM_PKGTMP:-$APP_ROOT/tmp}"
+
+mkdir -p "$VAR_DIR/logs" "$TMP_DIR" || exit 1
+exit 0

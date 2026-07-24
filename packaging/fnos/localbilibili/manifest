@@ -1,0 +1,16 @@
+appname=localbilibili
+version=0.1.88
+display_name=LocalBilibili
+desc=局域网版本地B站作品浏览 Web 应用
+platform=x86
+source=thirdparty
+maintainer=LocalBilibili
+distributor=LocalBilibili
+os_min_version=0.9.27
+install_type=root
+ctl_stop=true
+desktop_uidir=ui
+desktop_applaunchname=localbilibili.APPLICATION
+service_port=8090
+checkport=true
+disable_authorization_path=false

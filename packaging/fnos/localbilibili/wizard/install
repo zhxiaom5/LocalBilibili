@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "LocalBilibili 设置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "LocalBilibili 会在飞牛 OS 上以本地服务运行。安装后请在应用设置中授权B站作品所在目录，再进入应用配置页面保存目录并扫描。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_app_port",
+        "label": "应用端口",
+        "initValue": "8090",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入应用端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口必须是数字"
+          }
+        ]
+      }
+    ]
+  }
+]

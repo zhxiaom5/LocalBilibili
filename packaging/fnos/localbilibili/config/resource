@@ -1,0 +1,12 @@
+{
+  "data-share": {
+    "shares": [
+      {
+        "name": "localbilibili",
+        "permission": {
+          "rw": ["localbilibili"]
+        }
+      }
+    ]
+  }
+}

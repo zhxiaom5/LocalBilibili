@@ -1,0 +1,30 @@
+#!/bin/bash
+set -uo pipefail
+
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+APP_ROOT="${TRIM_APPDEST:-$SCRIPT_ROOT/app}"
+VAR_DIR="${TRIM_PKGVAR:-$APP_ROOT/var}"
+TMP_DIR="${TRIM_PKGTMP:-$APP_ROOT/tmp}"
+LOG_DIR="$VAR_DIR/logs"
+MAIN="$SCRIPT_ROOT/cmd/main"
+
+write_status() {
+  echo "$1"
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    echo "$1" > "$TRIM_TEMP_LOGFILE"
+  fi
+}
+
+mkdir -p "$VAR_DIR" "$TMP_DIR" "$LOG_DIR" || {
+  write_status "failed to create LocalBilibili runtime directories"
+  exit 1
+}
+chmod 700 "$TMP_DIR" 2>/dev/null || true
+chmod 755 "$VAR_DIR" "$LOG_DIR" 2>/dev/null || true
+
+if [ -x "$MAIN" ]; then
+  "$MAIN" stop >/dev/null 2>&1 || true
+fi
+
+write_status "LocalBilibili install init completed"
+exit 0

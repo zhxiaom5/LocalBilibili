@@ -1,0 +1,51 @@
+.DS_Store
+
+# Local environment and credentials. Keep only .env.example in Git.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+cookies.txt
+*.cookies.json
+
+# Local configuration, databases, logs, and generated reports.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+localbilibili.config*.json
+logs/
+output/
+.local/
+.run/
+
+# Frontend dependencies and generated assets.
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/
+web/.vite/
+
+# Tool caches, package outputs, and local binaries.
+.tools/
+dist/
+packaging/fnos/localdouyin/app/localdouyin
+packaging/fnos/localbilibili/app/localbilibili
+packaging/fnos/localbilibili/app/subtitle-cli
+packaging/fnos/localbilibili/app/yt-dlp
+packaging/fnos/localbilibili/app/subtitle-runtime/
+third_party/subtitle-runtime/
+
+bin/
+douyin/
+samples/
+# Downloaded media and private development-session material.
+media/
+downloads/
+docs/threads/
+docs/threads/*/thread.jsonl
