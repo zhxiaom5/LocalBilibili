@@ -11,6 +11,12 @@ import type {
   FavoriteStatus,
   FSEntry,
   LogEventsPage,
+  LearningCheck,
+  CodexLoginStatus,
+  LearningConfig,
+  LearningJob,
+  LearningQueue,
+  LearningStatus,
   RuntimeConfig,
   ScanStatus,
   SubtitleCheck,
@@ -145,7 +151,7 @@ export const api = {
   creators: (
     search = "",
     params: {
-      sort?: "updated_at" | "name" | "views";
+      sort?: "updated_at" | "name" | "work_count" | "views";
       order?: "asc" | "desc";
       minWorkCount?: number;
     } = {},
@@ -317,6 +323,27 @@ export const api = {
     request<{ url: string }>(`/api/subtitles/links/creators/${id}`),
   workSubtitleLink: (id: number) =>
     request<{ url: string }>(`/api/subtitles/links/works/${id}`),
+  learningConfig: () => request<{ config: LearningConfig }>("/api/learning/config"),
+  saveLearningConfig: (config: LearningConfig) => request<{ config: LearningConfig }>("/api/learning/config", { method: "PUT", body: JSON.stringify(config) }),
+  checkLearning: () => request<{ check: LearningCheck }>("/api/learning/check", { method: "POST" }),
+  checkWiseMapping: () => request<{ ok: boolean }>("/api/learning/wisemapping/check", { method: "POST" }),
+  codexLoginStatus: () => request<{ login: CodexLoginStatus }>("/api/learning/codex/login"),
+  startCodexLogin: () => request<{ login: CodexLoginStatus }>("/api/learning/codex/login", { method: "POST" }),
+  cancelCodexLogin: () => request<{ login: CodexLoginStatus }>("/api/learning/codex/login/cancel", { method: "POST" }),
+  logoutCodex: () => request<{ login: CodexLoginStatus }>("/api/learning/codex/logout", { method: "POST" }),
+  learningStatus: () => request<{ status: LearningStatus }>("/api/learning/status"),
+  learningJobs: () => request<{ jobs: LearningJob[] }>("/api/learning/jobs"),
+  learningRuns: () => request<{ runs: import('./types').LearningRun[] }>("/api/learning/runs"),
+  enqueueImmediateLearning: (creatorIds: number[] = [], workIds: number[] = [], source = "manual") => request<{ status: LearningStatus }>("/api/learning/immediate", { method: "POST", body: JSON.stringify({ creator_ids: creatorIds, work_ids: workIds, source }) }),
+  resetImmediateLearning: () => request<{ status: LearningStatus }>("/api/learning/immediate/reset", { method: "POST" }),
+  retryLearningJob: (id: number) => request<{ status: LearningStatus }>(`/api/learning/jobs/${id}/retry`, { method: "POST" }),
+  deleteLearningJob: (id: number) => request<{ ok: boolean }>(`/api/learning/jobs/${id}`, { method: "DELETE" }),
+  learningQueues: () => request<{ queues: LearningQueue[] }>("/api/learning/queues"),
+  createLearningQueue: (name: string, cron: string) => request<{ queue: LearningQueue }>("/api/learning/queues", { method: "POST", body: JSON.stringify({ name, cron }) }),
+  addLearningQueueCreators: (id: number, creatorIds: number[]) => request<{ ok: boolean }>(`/api/learning/queues/${id}/creators`, { method: "POST", body: JSON.stringify({ creator_ids: creatorIds }) }),
+  runLearningQueueNow: (id: number) => request<{ status: LearningStatus }>(`/api/learning/queues/${id}/run-now`, { method: "POST" }),
+  creatorMindMapLink: (id: number) => request<{ url: string }>(`/api/learning/links/creators/${id}`),
+  workMindMapLink: (id: number) => request<{ url: string; creator_url?: string }>(`/api/learning/links/works/${id}`),
   feed: (
     params: {
       creatorId?: number;
@@ -324,6 +351,7 @@ export const api = {
       favoriteFolderId?: number;
       search?: string;
       order?: "random" | "desc" | "asc";
+	      recentMode?: "three_days" | "week" | "works";
       limit?: number;
     } = {},
   ) => {
@@ -331,6 +359,7 @@ export const api = {
     query.set("mode", "random");
     query.set("limit", String(params.limit ?? 30));
     query.set("order", params.order ?? "random");
+	    if (params.recentMode) query.set("recent_mode", params.recentMode);
     if (params.creatorId) query.set("creator_id", String(params.creatorId));
     if (params.directoryId)
       query.set("directory_id", String(params.directoryId));

@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { FeedPage } from './FeedPage';
 
@@ -78,13 +78,20 @@ function renderPage(path = '/') {
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[path]}>
+        <LocationProbe />
         <Routes>
           <Route path="/" element={<FeedPage />} />
           <Route path="/creator/:creatorId" element={<FeedPage />} />
+          <Route path="/search" element={<div>搜索结果页</div>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname + location.search}</output>;
 }
 
 beforeEach(() => {
@@ -150,6 +157,19 @@ it('re-fetches feed with the selected order and keeps the current work when poss
   });
   expect(screen.getByText(/第三条/)).toBeInTheDocument();
   expect(window.localStorage.getItem('localbilibili.feedOrder')).toBe('desc');
+});
+
+it('opens the standalone search results page from the feed player search', async () => {
+  const user = userEvent.setup();
+  renderPage('/');
+
+  await screen.findByText(/第三条/);
+  await user.click(screen.getByLabelText('打开搜索'));
+  await user.type(screen.getByLabelText('搜索本地作品'), '夏天');
+  await user.keyboard('{Enter}');
+
+  expect(screen.getByText('搜索结果页')).toBeInTheDocument();
+  expect(screen.getByTestId('location')).toHaveTextContent('/search?q=%E5%A4%8F%E5%A4%A9');
 });
 
 it('allows wheel navigation after opening a creator feed with an initial work id', async () => {

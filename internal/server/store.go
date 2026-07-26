@@ -441,7 +441,10 @@ WHERE NOT EXISTS (SELECT 1 FROM subtitle_queues);
 	if err := s.migrateUserScopedFavorites(); err != nil {
 		return err
 	}
-	return s.backfillUserRoles()
+	if err := s.backfillUserRoles(); err != nil {
+		return err
+	}
+	return s.migrateLearning()
 }
 
 func (s *Store) addColumnIfMissing(table, column, definition string) error {
@@ -1363,6 +1366,8 @@ LEFT JOIN subtitle_stats ss ON ss.creator_id=c.id`
 	switch strings.ToLower(strings.TrimSpace(opts.Sort)) {
 	case "name":
 		query += ` ORDER BY c.name COLLATE NOCASE ` + order + `, c.id DESC`
+	case "work_count":
+		query += ` ORDER BY c.work_count ` + order + `, c.id ASC`
 	case "views":
 		query += ` ORDER BY view_count ` + order + `, c.name COLLATE NOCASE ASC`
 	case "updated_at", "recent", "":
@@ -1396,6 +1401,23 @@ type FeedOptions struct {
 	Search           string
 	Order            string
 	Limit            int
+	RecentMode       FeedRecentMode
+	Now              time.Time
+	RecentWindow     *FeedRecentWindow
+}
+
+type FeedRecentMode string
+
+const (
+	FeedRecentThreeDays FeedRecentMode = "three_days"
+	FeedRecentWeek      FeedRecentMode = "week"
+	FeedRecentWorks     FeedRecentMode = "works"
+)
+
+type FeedRecentWindow struct{ PublishedAfter string }
+
+func IsFeedRecentMode(mode FeedRecentMode) bool {
+	return mode == "" || mode == FeedRecentThreeDays || mode == FeedRecentWeek || mode == FeedRecentWorks
 }
 
 func (s *Store) Feed(creatorID int64, directoryID int64, search string, limit int) ([]Work, error) {
@@ -1407,18 +1429,23 @@ func (s *Store) FeedWithOptions(options FeedOptions) ([]Work, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
+	if !IsFeedRecentMode(options.RecentMode) {
+		return nil, errors.New("invalid recent feed mode")
+	}
 	order := strings.ToLower(strings.TrimSpace(options.Order))
 	switch order {
 	case "asc", "desc", "random":
 	default:
 		order = "random"
 	}
-	query := `SELECT w.id, w.directory_id, w.creator_id, c.name, c.avatar_url, c.bio, w.aweme_id, w.work_type, w.title, w.description, w.music_title, w.source_url, w.cover_url, w.cover_file, w.tags_json, w.published_at, w.created_at
-FROM works w JOIN creators c ON c.id=w.creator_id`
+	selectClause := `SELECT w.id, w.directory_id, w.creator_id, c.name, c.avatar_url, c.bio, w.aweme_id, w.work_type, w.title, w.description, w.music_title, w.source_url, w.cover_url, w.cover_file, w.tags_json, w.published_at, w.created_at`
+	fromClause := ` FROM works w JOIN creators c ON c.id=w.creator_id`
+	query := selectClause + fromClause
 	var args []any
 	var where []string
 	if options.FavoriteFolderID > 0 {
-		query += ` JOIN work_favorites wf ON wf.work_id=w.id`
+		fromClause += ` JOIN work_favorites wf ON wf.work_id=w.id`
+		query = selectClause + fromClause
 		where = append(where, "wf.folder_id=?")
 		args = append(args, options.FavoriteFolderID)
 	}
@@ -1445,6 +1472,19 @@ FROM works w JOIN creators c ON c.id=w.creator_id`
 		where = append(where, `w.search_text LIKE ?`)
 		args = append(args, like)
 	}
+	if options.RecentMode != "" {
+		publishedAfter, err := s.recentFeedPublishedAfter(options, fromClause, where, args, limit)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, "w.published_at<>''", "datetime(w.published_at)>=datetime(?)")
+		args = append(args, publishedAfter.Format(time.RFC3339))
+		if options.RecentWindow != nil {
+			options.RecentWindow.PublishedAfter = publishedAfter.Format(time.RFC3339)
+		}
+		query = selectClause + fromClause + " WHERE " + strings.Join(where, " AND ") + " ORDER BY RANDOM() LIMIT ?"
+		return s.feedWorks(query, append(args, limit)...)
+	}
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -1457,6 +1497,10 @@ FROM works w JOIN creators c ON c.id=w.creator_id`
 		query += ` ORDER BY RANDOM() LIMIT ?`
 	}
 	args = append(args, limit)
+	return s.feedWorks(query, args...)
+}
+
+func (s *Store) feedWorks(query string, args ...any) ([]Work, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -1488,6 +1532,45 @@ FROM works w JOIN creators c ON c.id=w.creator_id`
 		}
 	}
 	return works, nil
+}
+
+func (s *Store) recentFeedPublishedAfter(options FeedOptions, fromClause string, where []string, args []any, limit int) (time.Time, error) {
+	now := options.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	switch options.RecentMode {
+	case FeedRecentThreeDays:
+		return now.AddDate(0, 0, -3), nil
+	case FeedRecentWeek:
+		return now.AddDate(0, 0, -7), nil
+	case FeedRecentWorks:
+		baseWhere := append(append([]string{}, where...), "w.published_at<>''")
+		baseClause := strings.Join(baseWhere, " AND ")
+		var oldestRaw string
+		if err := s.db.QueryRow(`SELECT COALESCE(MIN(datetime(w.published_at)), '')`+fromClause+` WHERE `+baseClause, args...).Scan(&oldestRaw); err != nil {
+			return time.Time{}, err
+		}
+		if oldestRaw == "" {
+			return now, nil
+		}
+		windows := []time.Time{now.AddDate(0, 0, -1), now.AddDate(0, 0, -3), now.AddDate(0, 0, -7), now.AddDate(0, -1, 0)}
+		for index := 0; ; index++ {
+			publishedAfter := now.AddDate(0, -(index - len(windows) + 2), 0)
+			if index < len(windows) {
+				publishedAfter = windows[index]
+			}
+			var count int
+			if err := s.db.QueryRow(`SELECT COUNT(*)`+fromClause+` WHERE `+baseClause+` AND datetime(w.published_at)>=datetime(?)`, append(append([]any{}, args...), publishedAfter.Format(time.RFC3339))...).Scan(&count); err != nil {
+				return time.Time{}, err
+			}
+			if count >= limit || publishedAfter.UTC().Format("2006-01-02 15:04:05") <= oldestRaw {
+				return publishedAfter, nil
+			}
+		}
+	default:
+		return time.Time{}, errors.New("invalid recent feed mode")
+	}
 }
 
 func (s *Store) FavoriteFolders(userID int64, kind string) ([]FavoriteFolder, error) {

@@ -252,3 +252,11 @@ rtk npm run build --prefix web
 - 遇到失败测试，必须优先定位并修复根因。
 - 不得回滚用户未授权的改动。
 - 不得修改 LocalDouyin 来完成 LocalBilibili 任务。
+
+## 跨项目能力同步（项目自治）
+
+- 中央 `LocalContentCapabilityHub` 只负责能力审批和任务派发；不得在中央会话替代本项目实施。
+- 进入本项目准备开发前，必须先运行 `rtk ./scripts/capability-sync.sh`，检查 `docs/功能任务队列.tsv` 中状态为 `ready` 或 `in_progress` 的项目任务。
+- 每个接受的能力必须在本项目内创建独立 Goal/任务记录；Goal 标识、测试证据和阻塞原因只能由本项目写入。
+- 开始、阻塞或完成时，必须执行 `rtk ./scripts/capability-update.sh CAP-XXX <pending_approval|ready|in_progress|blocked|done> <goal_ref> <evidence>`，它会更新本项目队列及 `docs/开发进度.md`。
+- 只有项目验收完成后才可报请中央 Hub 更新 `decisions.tsv`；中央状态不是项目验收证据的替代品。

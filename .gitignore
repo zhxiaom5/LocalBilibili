@@ -11,11 +11,14 @@ web/.vite/
 .tools/
 .local/
 .run/
+.playwright-cli/
 dist/
 packaging/fnos/localdouyin/app/localdouyin
 packaging/fnos/localbilibili/app/localbilibili
 packaging/fnos/localbilibili/app/subtitle-cli
 packaging/fnos/localbilibili/app/yt-dlp
+packaging/fnos/localbilibili/app/codex
+packaging/fnos/localbilibili/app/codex.sha256
 packaging/fnos/localbilibili/app/subtitle-runtime/
 third_party/subtitle-runtime/
 

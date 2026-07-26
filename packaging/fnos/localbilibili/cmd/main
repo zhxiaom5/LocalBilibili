@@ -37,6 +37,8 @@ is_running() {
 case "${1:-}" in
   start)
     mkdir -p "$VAR_DIR" "$TMP_DIR" "$ACCESS_LOG_DIR"
+    mkdir -p "$VAR_DIR/codex" "$VAR_DIR/learning"
+    chmod 700 "$VAR_DIR/codex" "$VAR_DIR/learning"
     if is_running; then
       exit 0
     fi
@@ -52,6 +54,13 @@ case "${1:-}" in
       LOCALBILIBILI_LOG_DIR="$ACCESS_LOG_DIR" \
       LOCALBILIBILI_YTDLP="$APP_BIN_DIR/yt-dlp" \
       LOCALBILIBILI_SUBTITLE_CLI="$APP_BIN_DIR/subtitle-cli" \
+      LOCALBILIBILI_CODEX_PATH="$APP_BIN_DIR/codex" \
+      LOCALBILIBILI_CODEX_HOME="$VAR_DIR/codex" \
+      LOCALBILIBILI_LEARNING_SECRET_DIR="$VAR_DIR/learning" \
+      LOCALBILIBILI_LEARNING_MIGRATION_MARKER="$VAR_DIR/learning/localdouyin-import-v1.json" \
+      LOCALBILIBILI_LEARNING_SOURCE_CODEX_HOME="/var/apps/localdouyin/var/codex" \
+      LOCALBILIBILI_LEARNING_SOURCE_CONFIG="/var/apps/localdouyin/var/localdouyin.config.json" \
+      LOCALBILIBILI_LEARNING_SOURCE_WISEMAPPING_SECRET_FILE="/var/apps/localdouyin/var/learning/wisemapping.secret" \
       SUBTITLE_WHISPER_CLI="$APP_BIN_DIR/subtitle-runtime/whisper-cli" \
       SUBTITLE_FFMPEG="$APP_BIN_DIR/subtitle-runtime/ffmpeg" \
       SUBTITLE_MODEL="$APP_BIN_DIR/subtitle-runtime/models/ggml-small.bin" \

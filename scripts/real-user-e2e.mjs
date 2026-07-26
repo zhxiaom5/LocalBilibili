@@ -91,11 +91,12 @@ async function main() {
     }
 
     await ensureSampleCoverage(client);
+    const recent = await ensureRecentFeedCoverage(client, page);
     const feed = await assertFeedCoverage(client);
     await runFavoriteFlow(client, feed);
     await runQueueFlow(client, feed.creator);
     await runMultiUserFlow(page, client, feed);
-    await runBrowserFlow(page, feed);
+    await runBrowserFlow(page, feed, recent);
     await runDiagnosticsAndSecurity(client);
     await assertNoSeriousConsoleErrors(consoleErrors);
 
@@ -373,6 +374,52 @@ async function ensureSampleCoverage(api) {
   step("扫描本地样例兜底数据", { sampleDir: config.sampleDir });
 }
 
+async function ensureRecentFeedCoverage(api, page) {
+  const root = path.join(config.mediaDir, "recent-feed-e2e");
+  const now = Date.now();
+  const fixtures = [
+    { id: "BVrecentvideo", title: "近期搜索视频", workType: "video_long", publishedAt: new Date(now - 2 * 86400000).toISOString(), files: [{ type: "video", file: "recent.mp4", content: "fake recent video\n" }] },
+    { id: "recent-image-text", title: "近期搜索图文", workType: "image_text", publishedAt: new Date(now - 6 * 86400000).toISOString(), files: [{ type: "image", file: "recent.jpg", content: "fake recent image\n" }] },
+  ];
+  for (const fixture of fixtures) {
+    const creatorDir = path.join(root, "近期验收UP主__mid_900001");
+    const dir = path.join(creatorDir, fixture.id);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "metadata.localbilibili.json"), JSON.stringify({
+      work_type: fixture.workType, bvid: fixture.workType === "video_long" ? fixture.id : "", dynamic_id: fixture.workType === "image_text" ? fixture.id : "",
+      title: fixture.title, description: fixture.title, published_at: fixture.publishedAt,
+      source_url: "https://example.invalid/" + fixture.id,
+      creator: { mid: "900001", name: "近期验收UP主", space_url: "https://space.bilibili.com/900001" },
+      media: fixture.files.map(({ type, file }) => ({ type, file })),
+    }));
+    for (const file of fixture.files) {
+      const destination = path.join(dir, file.file);
+      if (file.type === "video") {
+        await fs.copyFile(path.join(config.sampleDir, "video_single", "2009-09-09_字幕君交流场所_BV1xx411c7mD", "media_001.mp4"), destination);
+      } else {
+        await fs.writeFile(destination, file.content);
+      }
+    }
+  }
+  let response = await api("/api/directories", { method: "POST", body: JSON.stringify({ path: root }), allowFailure: true });
+  const directoryID = response.status === 201 ? response.body.directory.id : (await api("/api/directories")).body.directories.find((item) => item.path === root)?.id;
+  assert(directoryID, "近期验收目录保存失败");
+  await api(`/api/directories/${directoryID}/scan`, { method: "POST" });
+  await waitForScanCompleted(api);
+  const threeDays = await api("/api/feed?recent_mode=three_days&order=desc&limit=20");
+  const week = await api("/api/feed?recent_mode=week&order=desc&limit=20");
+  const works = await api("/api/feed?recent_mode=works&order=desc&limit=20");
+  const cookies = await page.context().cookies(config.baseURL);
+  const invalid = await fetch(`${config.baseURL}/api/feed?recent_mode=invalid`, { headers: { Cookie: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ") } });
+  assert(invalid.status === 400, "非法 recent_mode 未返回 400");
+  assert((threeDays.body.works || []).some((work) => work.title === "近期搜索视频"), "最近三天缺少近期视频");
+  assert(!(threeDays.body.works || []).some((work) => work.title === "近期搜索图文"), "最近三天混入一周作品");
+  assert((week.body.works || []).some((work) => work.title === "近期搜索图文"), "最近一周缺少近期图文");
+  assert((works.body.works || []).some((work) => work.title === "近期搜索视频"), "最近作品缺少近期视频");
+  step("真实服务近期内容 API：三天、一周、最近作品与非法参数", { directory: root });
+  return { videoTitle: "近期搜索视频", imageTitle: "近期搜索图文" };
+}
+
 async function waitForScanCompleted(api) {
   const started = Date.now();
   let last;
@@ -548,9 +595,28 @@ async function runMultiUserFlow(page, api, feed) {
   step("多用户收藏隔离和普通用户权限限制");
 }
 
-async function runBrowserFlow(page, feed) {
+async function runBrowserFlow(page, feed, recent) {
   await page.goto(`${config.baseURL}/`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("text=LocalBilibili", { timeout: 10000 });
+  await page.getByLabel("作品播放器").hover();
+  await page.getByLabel("打开搜索").click();
+  await page.getByLabel("搜索本地作品").fill(recent.videoTitle);
+  await page.getByRole("button", { name: "搜索" }).click();
+  assert(new URL(page.url()).pathname === "/search", "Feed 搜索未进入独立结果页");
+  assert(new URL(page.url()).searchParams.get("q") === recent.videoTitle, "Feed 搜索未保留关键词");
+  await page.waitForSelector(`text=${recent.videoTitle}`, { timeout: 10000 });
+  await page.getByRole("link", { name: new RegExp(recent.videoTitle) }).click();
+  assert(new URL(page.url()).pathname === "/search/play", "独立搜索视频未进入搜索播放流");
+  await page.goto(`${config.baseURL}/search?q=${encodeURIComponent("近期搜索")}`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("link", { name: new RegExp(recent.imageTitle) }).click();
+  assert(new URL(page.url()).pathname === "/search/play", "独立搜索图文未进入搜索播放流");
+  for (const [route, expectedTitle] of [["/recent-3-days", recent.videoTitle], ["/recent-week", recent.imageTitle], ["/recent-works", recent.videoTitle]]) {
+    const responsePromise = page.waitForResponse((response) => response.url().includes("/api/feed?") && response.request().method() === "GET");
+    await page.goto(`${config.baseURL}${route}`, { waitUntil: "domcontentloaded" });
+    const response = await responsePromise;
+    const payload = await response.json();
+    assert((payload.works || []).some((work) => work.title === expectedTitle), `${route} 浏览器 Feed 未返回 ${expectedTitle}`);
+  }
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("ArrowUp");
   await page.screenshot({ path: path.join(rootDir, "output/playwright/real-user-feed-desktop.png"), fullPage: true });
@@ -567,7 +633,7 @@ async function runBrowserFlow(page, feed) {
   await page.goto(`${config.baseURL}/settings`, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("text=设置", { timeout: 10000 });
 
-  for (const route of ["/", "/creators", "/updates", "/favorite-works", "/favorite-creators", "/settings"]) {
+  for (const route of ["/", "/search?q=%E8%BF%91%E6%9C%9F%E6%90%9C%E7%B4%A2", "/creators", "/updates", "/favorite-works", "/favorite-creators", "/settings"]) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${config.baseURL}${route}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("body", { timeout: 10000 });
@@ -576,7 +642,7 @@ async function runBrowserFlow(page, feed) {
   }
   await page.screenshot({ path: path.join(rootDir, "output/playwright/real-user-mobile.png"), fullPage: true });
   report.artifacts.push("output/playwright/real-user-mobile.png");
-  step("真实浏览器页面、UP主详情、收藏页、更新页、设置页和移动端布局");
+  step("真实浏览器搜索、近期入口、页面、UP主详情、收藏页、更新页、设置页和移动端布局");
 }
 
 async function runDiagnosticsAndSecurity(api) {

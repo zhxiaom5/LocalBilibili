@@ -28,6 +28,8 @@ type App struct {
 	updateHub    *EventHub
 	subtitles    *SubtitleManager
 	subtitleHub  *EventHub
+	learning     *LearningManager
+	learningHub  *EventHub
 	browser      FileBrowser
 	web          WebAssets
 	accessLog    *AccessLogger
@@ -61,6 +63,7 @@ func NewAppWithAssets(dbPath string, web WebAssets) (*App, error) {
 	hub := NewEventHub()
 	updateHub := NewEventHub()
 	subtitleHub := NewEventHub()
+	learningHub := NewEventHub()
 	cleanDB := filepath.Clean(dbPath)
 	logger, err := NewAccessLogger(accessLogDir(filepath.Dir(cleanDB)))
 	if err != nil {
@@ -68,6 +71,7 @@ func NewAppWithAssets(dbPath string, web WebAssets) (*App, error) {
 		return nil, err
 	}
 	subtitleCfg := DefaultSubtitleRuntimeConfig()
+	learningCfg := DefaultLearningRuntimeConfig()
 	return &App{
 		store:        store,
 		scanner:      NewScanner(store, hub),
@@ -76,10 +80,12 @@ func NewAppWithAssets(dbPath string, web WebAssets) (*App, error) {
 		updateHub:    updateHub,
 		subtitles:    NewSubtitleManager(store, subtitleHub, subtitleCfg),
 		subtitleHub:  subtitleHub,
+		learning:     NewLearningManager(store, learningHub, learningCfg),
+		learningHub:  learningHub,
 		browser:      NewFileBrowserFromEnv(),
 		web:          web,
 		accessLog:    logger,
-		config:       AppConfig{DatabaseDir: filepath.Dir(cleanDB), DownloaderConcurrency: DefaultDownloaderConcurrency, Subtitle: subtitleCfg},
+		config:       AppConfig{DatabaseDir: filepath.Dir(cleanDB), DownloaderConcurrency: DefaultDownloaderConcurrency, Subtitle: subtitleCfg, Learning: learningCfg},
 		databaseDir:  filepath.Dir(cleanDB),
 		databasePath: cleanDB,
 	}, nil
@@ -92,6 +98,9 @@ func NewConfiguredApp(configPath string, defaultDatabaseDir string, webDir strin
 func NewConfiguredAppWithAssets(configPath string, defaultDatabaseDir string, web WebAssets) (*App, error) {
 	cfg, err := LoadConfig(configPath, defaultDatabaseDir)
 	if err != nil {
+		return nil, err
+	}
+	if err := migrateLearningCredentialsOnce(configPath, &cfg); err != nil {
 		return nil, err
 	}
 	dbInfo, err := InspectDatabaseDirectory(cfg.DatabaseDir)
@@ -108,7 +117,8 @@ func NewConfiguredAppWithAssets(configPath string, defaultDatabaseDir string, we
 	app.databasePath = dbInfo.Path
 	app.updater.SetConcurrency(cfg.DownloaderConcurrency)
 	app.subtitles.SetConfig(cfg.Subtitle)
-	if err := SaveConfig(configPath, AppConfig{DatabaseDir: dbInfo.Directory, DownloaderConcurrency: cfg.DownloaderConcurrency, Subtitle: cfg.Subtitle}); err != nil {
+	app.learning.SetConfig(cfg.Learning)
+	if err := SaveConfig(configPath, AppConfig{DatabaseDir: dbInfo.Directory, DownloaderConcurrency: cfg.DownloaderConcurrency, Subtitle: cfg.Subtitle, Learning: cfg.Learning}); err != nil {
 		_ = app.Close()
 		return nil, err
 	}
@@ -119,6 +129,7 @@ func (a *App) Close() error {
 	a.mu.RLock()
 	updater := a.updater
 	subtitles := a.subtitles
+	learning := a.learning
 	accessLog := a.accessLog
 	store := a.store
 	a.mu.RUnlock()
@@ -127,6 +138,9 @@ func (a *App) Close() error {
 	}
 	if subtitles != nil {
 		subtitles.Close()
+	}
+	if learning != nil {
+		learning.Close()
 	}
 	if accessLog != nil {
 		_ = accessLog.Close()
@@ -225,6 +239,27 @@ func (a *App) handleAuthedRoutes(w http.ResponseWriter, r *http.Request) {
 	mux.HandleFunc("POST /api/subtitles/queues/{id}/run-now", a.handleRunSubtitleQueueNow)
 	mux.HandleFunc("GET /api/subtitles/links/creators/{id}", a.handleCreatorSubtitleLink)
 	mux.HandleFunc("GET /api/subtitles/links/works/{id}", a.handleWorkSubtitleLink)
+	mux.HandleFunc("GET /api/learning/config", a.handleLearningConfig)
+	mux.HandleFunc("PUT /api/learning/config", a.handleSaveLearningConfig)
+	mux.HandleFunc("POST /api/learning/check", a.handleCheckLearning)
+	mux.HandleFunc("POST /api/learning/wisemapping/check", a.handleCheckWiseMapping)
+	mux.HandleFunc("GET /api/learning/codex/login", a.handleCodexLoginStatus)
+	mux.HandleFunc("POST /api/learning/codex/login", a.handleStartCodexLogin)
+	mux.HandleFunc("POST /api/learning/codex/login/cancel", a.handleCancelCodexLogin)
+	mux.HandleFunc("POST /api/learning/codex/logout", a.handleLogoutCodex)
+	mux.HandleFunc("GET /api/learning/status", a.handleLearningStatus)
+	mux.HandleFunc("POST /api/learning/immediate", a.handleLearningImmediate)
+	mux.HandleFunc("POST /api/learning/immediate/reset", a.handleResetLearning)
+	mux.HandleFunc("GET /api/learning/jobs", a.handleLearningJobs)
+	mux.HandleFunc("GET /api/learning/runs", a.handleLearningRuns)
+	mux.HandleFunc("DELETE /api/learning/jobs/{id}", a.handleDeleteLearningJob)
+	mux.HandleFunc("POST /api/learning/jobs/{id}/retry", a.handleRetryLearningJob)
+	mux.HandleFunc("GET /api/learning/queues", a.handleLearningQueues)
+	mux.HandleFunc("POST /api/learning/queues", a.handleCreateLearningQueue)
+	mux.HandleFunc("POST /api/learning/queues/{id}/creators", a.handleAddLearningQueueCreators)
+	mux.HandleFunc("POST /api/learning/queues/{id}/run-now", a.handleRunLearningQueueNow)
+	mux.HandleFunc("GET /api/learning/links/creators/{id}", a.handleCreatorMindMapLink)
+	mux.HandleFunc("GET /api/learning/links/works/{id}", a.handleWorkMindMapLink)
 	mux.HandleFunc("GET /api/favorite-folders", a.handleFavoriteFolders)
 	mux.HandleFunc("POST /api/favorite-folders", a.handleCreateFavoriteFolder)
 	mux.HandleFunc("PATCH /api/favorite-folders/{id}", a.handleUpdateFavoriteFolder)
@@ -472,6 +507,11 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		defer subtitleUnsubscribe()
 		bridgeRealtimeEvents(r.Context(), events, "update", updateCh)
 		bridgeRealtimeEvents(r.Context(), events, "subtitle", subtitleCh)
+		if a.learningHub != nil {
+			learningCh, learningUnsubscribe := a.learningHub.Subscribe()
+			defer learningUnsubscribe()
+			bridgeRealtimeEvents(r.Context(), events, "learning", learningCh)
+		}
 	}
 
 	for {
@@ -823,13 +863,16 @@ func (a *App) handleUpdateDatabaseConfig(w http.ResponseWriter, r *http.Request)
 	newHub := NewEventHub()
 	newUpdateHub := NewEventHub()
 	newSubtitleHub := NewEventHub()
+	newLearningHub := NewEventHub()
 	newScanner := NewScanner(replacementStore, newHub)
 	newUpdater := NewUpdateManager(replacementStore, newUpdateHub, nil, currentConfig.DownloaderConcurrency)
 	newSubtitles := NewSubtitleManager(replacementStore, newSubtitleHub, currentConfig.Subtitle)
+	newLearning := NewLearningManager(replacementStore, newLearningHub, currentConfig.Learning)
 	a.mu.Lock()
 	oldStore := a.store
 	oldUpdater := a.updater
 	oldSubtitles := a.subtitles
+	oldLearning := a.learning
 	a.store = replacementStore
 	a.scanner = newScanner
 	a.hub = newHub
@@ -837,6 +880,8 @@ func (a *App) handleUpdateDatabaseConfig(w http.ResponseWriter, r *http.Request)
 	a.updater = newUpdater
 	a.subtitleHub = newSubtitleHub
 	a.subtitles = newSubtitles
+	a.learningHub = newLearningHub
+	a.learning = newLearning
 	a.config = currentConfig
 	a.databaseDir = dbInfo.Directory
 	a.databasePath = dbInfo.Path
@@ -846,6 +891,9 @@ func (a *App) handleUpdateDatabaseConfig(w http.ResponseWriter, r *http.Request)
 	}
 	if oldSubtitles != nil {
 		oldSubtitles.Close()
+	}
+	if oldLearning != nil {
+		oldLearning.Close()
 	}
 	if oldStore != nil {
 		_ = oldStore.Close()
@@ -1173,6 +1221,11 @@ func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 	directoryID, _ := strconv.ParseInt(r.URL.Query().Get("directory_id"), 10, 64)
 	favoriteFolderID, _ := strconv.ParseInt(r.URL.Query().Get("favorite_folder_id"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	recentMode := FeedRecentMode(r.URL.Query().Get("recent_mode"))
+	if !IsFeedRecentMode(recentMode) {
+		writeError(w, http.StatusBadRequest, "invalid recent_mode")
+		return
+	}
 	works, err := a.store.FeedWithOptions(FeedOptions{
 		CreatorID:        creatorID,
 		DirectoryID:      directoryID,
@@ -1180,6 +1233,7 @@ func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 		Search:           r.URL.Query().Get("search"),
 		Order:            r.URL.Query().Get("order"),
 		Limit:            limit,
+		RecentMode:       recentMode,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

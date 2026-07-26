@@ -42,6 +42,19 @@ export type CreatorLinks = {
   candidates: Creator[];
 };
 
+export type LearningCredentialMigration = {
+  codex: "copied" | "source_missing" | "invalid" | "already_local" | string;
+  wisemapping: "copied" | "source_missing" | "invalid" | "already_local" | string;
+  completed_at: string;
+};
+export type LearningConfig = { codex_path?: string; wisemapping_url?: string; wisemapping_user?: string; wisemapping_password?: string; default_cron: string; password_configured: boolean; work_prompt: string; creator_prompt: string; credential_migration?: LearningCredentialMigration };
+export type LearningCheck = { ok: boolean; codex_path?: string; codex_version?: string; message?: string; password_configured: boolean; codex_logged_in: boolean };
+export type CodexLoginStatus = { state: 'pending' | 'logged_in' | 'logged_out' | 'failed' | 'cancelled' | string; verification_url?: string; user_code?: string; message?: string; expires_at?: string };
+export type LearningJob = { id: number; creator_id: number; creator_name: string; work_id?: number; work_title?: string; queue_id?: number; run_id?: number; attempt: number; source: string; status: string; processed_works: number; total_works: number; progress_message?: string; error?: string; created_at: string; started_at?: string; finished_at?: string };
+export type LearningStatus = { running: boolean; current_creator?: string; pending: number; succeeded: number; failed: number; progress: number; jobs: LearningJob[]; errors: string[] };
+export type LearningQueue = { id: number; name: string; cron: string; enabled: boolean; next_run_at: string; last_run_summary: string; subscribed_count: number };
+export type LearningRun = { id:number; queue_id:number; queue_name:string; enqueued_at:string; started_at?:string; finished_at?:string; total_jobs:number; succeeded:number; failed:number; status:string; summary:string };
+
 export type BulkImportItem = {
   input: string;
   bilibili_space_url?: string;

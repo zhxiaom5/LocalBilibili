@@ -9,6 +9,7 @@ import {
   Headphones,
   Heart,
   Maximize2,
+  Map,
   Minimize2,
   MoreHorizontal,
   Pause,
@@ -36,6 +37,7 @@ type FeedViewerProps = {
   order?: FeedOrder;
   onOrderChange?: (order: FeedOrder) => void;
   onCurrentWorkChange?: (workId: number) => void;
+  isAdmin?: boolean;
 };
 
 const AUTO_PLAY_NEXT_KEY = 'localbilibili.autoPlayNext';
@@ -190,6 +192,7 @@ export function FeedViewer({
   order = 'random',
   onOrderChange,
   onCurrentWorkChange,
+  isAdmin = false,
 }: FeedViewerProps) {
   const [workIndex, setWorkIndex] = useState(() => {
     const nextIndex = initialWorkId ? works.findIndex((item) => item.id === initialWorkId) : -1;
@@ -223,6 +226,7 @@ export function FeedViewer({
   const [backgroundAudio, setBackgroundAudio] = useState(readBackgroundAudio);
   const [hasPictureInPictureSupport, setHasPictureInPictureSupport] = useState(false);
   const [isPictureInPicture, setIsPictureInPicture] = useState(false);
+  const [mindMapChoiceOpen, setMindMapChoiceOpen] = useState(false);
   const overlayTimer = useRef<number | undefined>(undefined);
   const subtitleNoticeTimer = useRef<number | undefined>(undefined);
   const playerNoticeTimer = useRef<number | undefined>(undefined);
@@ -239,6 +243,13 @@ export function FeedViewer({
   const autoplayTargetMediaIDRef = useRef<number | null>(null);
   const autoplayAttemptedMediaIDRef = useRef<number | null>(null);
   const metadataLoadedMediaIDRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!mindMapChoiceOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setMindMapChoiceOpen(false); };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [mindMapChoiceOpen]);
   const playedMediaIDRef = useRef<number | null>(null);
   const lastManualWorkChangeAtRef = useRef(0);
   const viewedWorkRef = useRef<number | null>(null);
@@ -1138,6 +1149,29 @@ export function FeedViewer({
     subtitleNoticeTimer.current = window.setTimeout(() => setSubtitleNotice(''), 2600);
   };
 
+  const openWorkMindMap = async () => {
+    try {
+      const response = await api.workMindMapLink(work.id);
+      window.open(absoluteURL(response.url), '_blank', 'noopener,noreferrer');
+    } catch {
+      setMindMapChoiceOpen(true);
+    }
+    activateOverlay();
+  };
+
+  const openCreatorMindMap = async (generateWork: boolean) => {
+    try {
+      if (generateWork) await api.enqueueImmediateLearning([], [work.id], 'feed-mind-map');
+      const response = await api.creatorMindMapLink(work.creator_id);
+      window.open(absoluteURL(response.url), '_blank', 'noopener,noreferrer');
+      if (generateWork) setSubtitleNotice('已加入当前作品导图生成队列；已打开UP主思维导图。');
+      setMindMapChoiceOpen(false);
+    } catch (cause) {
+      setSubtitleNotice(cause instanceof Error ? cause.message : '思维导图不可用');
+    }
+    activateOverlay();
+  };
+
   return (
     <div
       ref={viewerRef}
@@ -1306,9 +1340,14 @@ export function FeedViewer({
                   <span>字幕</span>
                 </button>
               )}
+              <button className="rail-button subtitle-link-button mind-map-button" type="button" title="查看思维导图" aria-label="查看思维导图" onClick={() => void openWorkMindMap()}>
+                <Map size={28} />
+                <span>导图</span>
+              </button>
             </aside>
             {subtitleNotice && <div className="subtitle-copy-notice">{subtitleNotice}</div>}
             {playerNotice && <div className="subtitle-copy-notice player-control-notice">{playerNotice}</div>}
+            {mindMapChoiceOpen && <div className="modal-backdrop" role="presentation" onClick={() => setMindMapChoiceOpen(false)}><section className="modal mind-map-choice-modal" role="dialog" aria-modal="true" aria-labelledby="mind-map-choice-title" onClick={event => event.stopPropagation()}><h2 id="mind-map-choice-title">该作品暂无思维导图</h2><p>可直接查看UP主聚合导图，或先补齐当前作品导图后再打开UP主聚合导图。</p><div className="modal-actions"><button type="button" onClick={() => void openCreatorMindMap(false)}>打开UP主思维导图</button>{isAdmin && <button type="button" onClick={() => void openCreatorMindMap(true)}>打开并补齐作品导图</button>}<button type="button" className="danger-button" onClick={() => setMindMapChoiceOpen(false)}>取消</button></div></section></div>}
 
             {work.media.length > 1 && (
               <div className="media-controls floating-media-controls">

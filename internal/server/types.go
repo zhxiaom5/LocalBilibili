@@ -305,6 +305,99 @@ type SubtitleJobsPage struct {
 	TotalPages int           `json:"total_pages"`
 }
 
+type LearningConfig struct {
+	CodexPath           string                       `json:"codex_path,omitempty"`
+	WiseMappingURL      string                       `json:"wisemapping_url,omitempty"`
+	WiseMappingUser     string                       `json:"wisemapping_user,omitempty"`
+	WiseMappingPassword string                       `json:"wisemapping_password,omitempty"`
+	DefaultCron         string                       `json:"default_cron"`
+	PasswordConfigured  bool                         `json:"password_configured"`
+	WorkPrompt          string                       `json:"work_prompt"`
+	CreatorPrompt       string                       `json:"creator_prompt"`
+	CredentialMigration *LearningCredentialMigration `json:"credential_migration,omitempty"`
+}
+
+type LearningCheck struct {
+	OK                 bool   `json:"ok"`
+	CodexPath          string `json:"codex_path,omitempty"`
+	CodexVersion       string `json:"codex_version,omitempty"`
+	Message            string `json:"message,omitempty"`
+	PasswordConfigured bool   `json:"password_configured"`
+	CodexLoggedIn      bool   `json:"codex_logged_in"`
+}
+
+type CodexLoginStatus struct {
+	State           string `json:"state"`
+	VerificationURL string `json:"verification_url,omitempty"`
+	UserCode        string `json:"user_code,omitempty"`
+	Message         string `json:"message,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
+}
+type LearningJob struct {
+	ID              int64     `json:"id"`
+	CreatorID       int64     `json:"creator_id"`
+	CreatorName     string    `json:"creator_name"`
+	WorkID          int64     `json:"work_id,omitempty"`
+	WorkTitle       string    `json:"work_title,omitempty"`
+	QueueID         int64     `json:"queue_id,omitempty"`
+	RunID           int64     `json:"run_id,omitempty"`
+	RetryOfJobID    int64     `json:"retry_of_job_id,omitempty"`
+	Attempt         int       `json:"attempt"`
+	Source          string    `json:"source"`
+	Status          string    `json:"status"`
+	ProcessedWorks  int       `json:"processed_works"`
+	TotalWorks      int       `json:"total_works"`
+	ProgressMessage string    `json:"progress_message,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	StartedAt       string    `json:"started_at,omitempty"`
+	FinishedAt      string    `json:"finished_at,omitempty"`
+}
+type LearningRun struct {
+	ID         int64     `json:"id"`
+	QueueID    int64     `json:"queue_id"`
+	QueueName  string    `json:"queue_name"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
+	StartedAt  string    `json:"started_at,omitempty"`
+	FinishedAt string    `json:"finished_at,omitempty"`
+	TotalJobs  int       `json:"total_jobs"`
+	Succeeded  int       `json:"succeeded"`
+	Failed     int       `json:"failed"`
+	Status     string    `json:"status"`
+	Summary    string    `json:"summary"`
+}
+type LearningStatus struct {
+	Running        bool          `json:"running"`
+	CurrentCreator string        `json:"current_creator,omitempty"`
+	Pending        int           `json:"pending"`
+	Succeeded      int           `json:"succeeded"`
+	Failed         int           `json:"failed"`
+	Progress       int           `json:"progress"`
+	Jobs           []LearningJob `json:"jobs"`
+	Errors         []string      `json:"errors"`
+}
+type LearningQueue struct {
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	Cron            string `json:"cron"`
+	Enabled         bool   `json:"enabled"`
+	NextRunAt       string `json:"next_run_at"`
+	LastRunSummary  string `json:"last_run_summary"`
+	SubscribedCount int64  `json:"subscribed_count"`
+}
+type MindMapRecord struct {
+	ID                 int64  `json:"id"`
+	CreatorID          int64  `json:"creator_id"`
+	WorkID             int64  `json:"work_id,omitempty"`
+	MapID              string `json:"map_id"`
+	MapURL             string `json:"map_url"`
+	Title              string `json:"title"`
+	SummaryJSON        string `json:"-"`
+	ContentFingerprint string `json:"content_fingerprint"`
+	SyncStatus         string `json:"sync_status"`
+	UpdatedAt          string `json:"updated_at"`
+}
+
 type ViewContext struct {
 	ActorUser User `json:"actor_user"`
 	ViewUser  User `json:"view_user"`

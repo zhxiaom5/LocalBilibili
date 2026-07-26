@@ -19,7 +19,7 @@ export function CreatorsPage({ currentUser }: { currentUser: User }) {
   const [notice, setNotice] = useState<Notice>(null);
   const [linkTarget, setLinkTarget] = useState<Creator | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Creator | null>(null);
-  const [sort, setSort] = useState<'updated_at' | 'name' | 'views'>('updated_at');
+  const [sort, setSort] = useState<'updated_at' | 'name' | 'work_count' | 'views'>('updated_at');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
   const [filterByWorkCount, setFilterByWorkCount] = useState(true);
   const [minWorkCount, setMinWorkCount] = useState(1);
@@ -51,6 +51,16 @@ export function CreatorsPage({ currentUser }: { currentUser: User }) {
       queryClient.invalidateQueries({ queryKey: ['subtitle-status'] });
       queryClient.invalidateQueries({ queryKey: ['subtitle-jobs'] });
     },
+    onError: (cause) => setNotice({ type: 'error', text: errorMessage(cause) }),
+  });
+  const learningImmediate = useMutation({
+    mutationFn: (ids: number[]) => api.enqueueImmediateLearning(ids),
+    onSuccess: () => { setNotice({ type: 'success', text: '已加入学习导图生成队列' }); queryClient.invalidateQueries({ queryKey: ['learning-status'] }); },
+    onError: (cause) => setNotice({ type: 'error', text: errorMessage(cause) }),
+  });
+  const openMindMaps = useMutation({
+    mutationFn: api.creatorMindMapLink,
+    onSuccess: (data) => window.open(absoluteURL(data.url), '_blank', 'noopener,noreferrer'),
     onError: (cause) => setNotice({ type: 'error', text: errorMessage(cause) }),
   });
   const copyCreatorSubtitles = useMutation({
@@ -125,6 +135,7 @@ export function CreatorsPage({ currentUser }: { currentUser: User }) {
           <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)} aria-label="UP主排序字段">
             <option value="updated_at">最近更新时间</option>
             <option value="name">UP主名</option>
+            <option value="work_count">作品总数</option>
             <option value="views">UP主访问量</option>
           </select>
         </label>
@@ -195,11 +206,17 @@ export function CreatorsPage({ currentUser }: { currentUser: User }) {
                 <button type="button" onClick={() => copyCreatorSubtitles.mutate(creator.id)} disabled={copyCreatorSubtitles.isPending || creator.work_count === 0}>
                   获取字幕
                 </button>
+                <button type="button" onClick={() => learningImmediate.mutate([creator.id])} disabled={learningImmediate.isPending}>
+                  生成导图
+                </button>
                 <button type="button" className="danger" onClick={() => setDeleteTarget(creator)} disabled={deleteCreator.isPending}>
                   <Trash2 size={15} /> 删除
                 </button>
               </div>
             )}
+            <button type="button" className="creator-mind-map-link" onClick={() => openMindMaps.mutate(creator.id)}>
+              查看导图
+            </button>
           </article>
         ))}
       </div>

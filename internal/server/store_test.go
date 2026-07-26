@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -343,6 +344,44 @@ func TestFeedOrderModes(t *testing.T) {
 	}
 }
 
+func TestRecentFeedsUsePublishedAtAndExpandRecentWorksWindow(t *testing.T) {
+	store := newTestStore(t)
+	dir, err := store.SaveDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	creator, _, err := store.UpsertCreatorWithWorks(dir.ID, "近期UP主", []WorkInput{
+		{AwemeID: "three-days", Title: "三天内", PublishedAt: now.AddDate(0, 0, -2).Format(time.RFC3339)},
+		{AwemeID: "week", Title: "一周内", PublishedAt: now.AddDate(0, 0, -6).Format(time.RFC3339)},
+		{AwemeID: "old", Title: "较早", PublishedAt: now.AddDate(0, -2, 0).Format(time.RFC3339)},
+		{AwemeID: "missing-date", Title: "无日期"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creator.ID == 0 {
+		t.Fatal("creator was not persisted")
+	}
+
+	threeDays, err := store.FeedWithOptions(FeedOptions{RecentMode: FeedRecentThreeDays, Now: now, Limit: 10})
+	if err != nil || len(threeDays) != 1 || threeDays[0].AwemeID != "three-days" {
+		t.Fatalf("three days feed = %#v, err=%v", threeDays, err)
+	}
+	week, err := store.FeedWithOptions(FeedOptions{RecentMode: FeedRecentWeek, Now: now, Limit: 10})
+	if err != nil || len(week) != 2 {
+		t.Fatalf("week feed = %#v, err=%v", week, err)
+	}
+	window := &FeedRecentWindow{}
+	works, err := store.FeedWithOptions(FeedOptions{RecentMode: FeedRecentWorks, Now: now, Limit: 3, RecentWindow: window})
+	if err != nil || len(works) != 3 {
+		t.Fatalf("recent works = %#v, err=%v", works, err)
+	}
+	if window.PublishedAfter != now.AddDate(0, -2, 0).Format(time.RFC3339) {
+		t.Fatalf("recent works cutoff = %q", window.PublishedAfter)
+	}
+}
+
 func TestCreatorsSearchFiltersByName(t *testing.T) {
 	store := newTestStore(t)
 	dir, err := store.SaveDirectory(t.TempDir())
@@ -473,6 +512,58 @@ func TestCreatorsWithOptionsAggregatesSortsFiltersAndLinks(t *testing.T) {
 	}
 	if byRecent[0].ID != creatorB.ID || byRecent[0].LastWorkCreatedAt != "2026-02-02T00:00:00Z" {
 		t.Fatalf("recent sort/aggregate mismatch: %#v", byRecent)
+	}
+}
+
+func TestCreatorsWithOptionsSortsAllWorkTypesByWorkCount(t *testing.T) {
+	store := newTestStore(t)
+	dir, err := store.SaveDirectory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	media := func(name string, typ string) []MediaInput {
+		return []MediaInput{{Type: typ, FilePath: filepath.Join(t.TempDir(), name), FileName: name}}
+	}
+	alpha, _, err := store.UpsertCreatorWithWorks(dir.ID, "阿尔法", []WorkInput{
+		{AwemeID: "alpha-long", WorkType: "video_long", Media: media("alpha-long.mp4", "video")},
+		{AwemeID: "alpha-short", WorkType: "video_short", Media: media("alpha-short.mp4", "video")},
+		{AwemeID: "alpha-image", WorkType: "image_text", Media: media("alpha-image.webp", "image")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, _, err := store.UpsertCreatorWithWorks(dir.ID, "贝塔", []WorkInput{
+		{AwemeID: "beta-short", WorkType: "video_short", Media: media("beta-short.mp4", "video")},
+		{AwemeID: "beta-image", WorkType: "image_text", Media: media("beta-image.webp", "image")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gamma, _, err := store.UpsertCreatorWithWorks(dir.ID, "伽马", []WorkInput{
+		{AwemeID: "gamma-long", WorkType: "video_long", Media: media("gamma-long.mp4", "video")},
+		{AwemeID: "gamma-image", WorkType: "image_text", Media: media("gamma-image.webp", "image")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ascending, err := store.CreatorsWithOptions(CreatorListOptions{Sort: "work_count", Order: "asc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ascending) != 3 || ascending[0].ID != beta.ID || ascending[1].ID != gamma.ID || ascending[2].ID != alpha.ID {
+		t.Fatalf("ascending work count order = %#v", ascending)
+	}
+	if ascending[0].WorkCount != 2 || ascending[1].WorkCount != 2 || ascending[2].WorkCount != 3 {
+		t.Fatalf("work counts should include all work types: %#v", ascending)
+	}
+
+	descending, err := store.CreatorsWithOptions(CreatorListOptions{Sort: "work_count", Order: "desc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(descending) != 3 || descending[0].ID != alpha.ID || descending[1].ID != beta.ID || descending[2].ID != gamma.ID {
+		t.Fatalf("descending work count order = %#v", descending)
 	}
 }
 

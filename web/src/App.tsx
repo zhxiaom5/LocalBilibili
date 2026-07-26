@@ -15,7 +15,9 @@ import {
   useNavigate,
 } from "react-router-dom";
 import {
+  Brain,
   Captions,
+	CalendarDays,
   ChevronsLeft,
   ChevronsRight,
   FolderHeart,
@@ -41,7 +43,9 @@ import { FavoriteCreatorsPage, FavoriteWorksPage } from "./pages/FavoritesPage";
 import { FeedPage } from "./pages/FeedPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogsPage } from "./pages/LogsPage";
+import { LearningPage } from "./pages/LearningPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { SearchPage } from "./pages/SearchPage";
 import { SubtitlesPage } from "./pages/SubtitlesPage";
 import { UpdatesPage } from "./pages/UpdatesPage";
 import { UserManagementPage } from "./pages/UserManagementPage";
@@ -195,6 +199,15 @@ function AppShell({
           <NavLink to="/creators" title="关注" onClick={closeMobile}>
             <List size={20} /> <span>关注</span>
           </NavLink>
+	          <NavLink to="/recent-3-days" title="最近三天" onClick={closeMobile}>
+	            <CalendarDays size={20} /> <span>最近三天</span>
+	          </NavLink>
+	          <NavLink to="/recent-week" title="最近一周" onClick={closeMobile}>
+	            <CalendarDays size={20} /> <span>最近一周</span>
+	          </NavLink>
+	          <NavLink to="/recent-works" title="最近作品" onClick={closeMobile}>
+	            <CalendarDays size={20} /> <span>最近作品</span>
+	          </NavLink>
           <NavLink
             to="/favorite-works"
             title="作品收藏夹"
@@ -220,6 +233,11 @@ function AppShell({
           {user.is_admin && (
             <NavLink to="/subtitles" title="字幕管理" onClick={closeMobile}>
               <Captions size={20} /> <span>字幕管理</span>
+            </NavLink>
+          )}
+          {user.is_admin && (
+            <NavLink to="/learning" title="学习管理" onClick={closeMobile}>
+              <Brain size={20} /> <span>学习管理</span>
             </NavLink>
           )}
           {user.is_super_admin && (
@@ -267,12 +285,17 @@ function AppShell({
       </aside>
       <main className="main-area">
         <Routes>
-          <Route path="/" element={<FeedPage />} />
+          <Route path="/" element={<FeedPage isAdmin={user.is_admin} />} />
+	          <Route path="/search" element={<SearchPage />} />
+	          <Route path="/search/play" element={<FeedPage isAdmin={user.is_admin} />} />
+	          <Route path="/recent-3-days" element={<FeedPage isAdmin={user.is_admin} recentMode="three_days" />} />
+	          <Route path="/recent-week" element={<FeedPage isAdmin={user.is_admin} recentMode="week" />} />
+	          <Route path="/recent-works" element={<FeedPage isAdmin={user.is_admin} recentMode="works" />} />
           <Route
             path="/creators"
             element={<CreatorsPage currentUser={user} />}
           />
-          <Route path="/creator/:creatorId" element={<FeedPage />} />
+          <Route path="/creator/:creatorId" element={<FeedPage isAdmin={user.is_admin} />} />
           <Route path="/favorite-works" element={<FavoriteWorksPage />} />
           <Route
             path="/favorite-works/:folderId"
@@ -280,7 +303,7 @@ function AppShell({
           />
           <Route
             path="/favorite-works/:favoriteFolderId/play"
-            element={<FeedPage />}
+            element={<FeedPage isAdmin={user.is_admin} />}
           />
           <Route path="/favorite-creators" element={<FavoriteCreatorsPage />} />
           <Route
@@ -297,6 +320,12 @@ function AppShell({
             path="/subtitles"
             element={
               user.is_admin ? <SubtitlesPage /> : <Navigate to="/" replace />
+            }
+          />
+          <Route
+            path="/learning"
+            element={
+              user.is_admin ? <LearningPage /> : <Navigate to="/" replace />
             }
           />
           <Route

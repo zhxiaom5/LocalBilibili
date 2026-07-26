@@ -1,12 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { FeedViewer } from '../components/FeedViewer';
 
 const FEED_ORDER_KEY = 'localbilibili.feedOrder';
 
 type FeedOrder = 'random' | 'desc' | 'asc';
+type RecentMode = 'three_days' | 'week' | 'works';
 
 function readFeedOrder(): FeedOrder {
   try {
@@ -18,18 +19,21 @@ function readFeedOrder(): FeedOrder {
   return 'random';
 }
 
-export function FeedPage() {
+export function FeedPage({ isAdmin = false, recentMode }: { isAdmin?: boolean; recentMode?: RecentMode }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const params = useParams();
   const [searchParams] = useSearchParams();
   const creatorId = parsePositiveInt(params.creatorId);
   const favoriteFolderId = parsePositiveInt(params.favoriteFolderId);
   const initialWorkId = parsePositiveInt(searchParams.get('work_id'));
-  const [search, setSearch] = useState('');
+  const searchPlayback = location.pathname === '/search/play';
+  const [search, setSearch] = useState(() => searchPlayback ? (searchParams.get('q') ?? '').trim() : '');
   const [order, setOrder] = useState<FeedOrder>(readFeedOrder);
   const [currentWorkId, setCurrentWorkId] = useState<number | undefined>(initialWorkId);
   const feed = useQuery({
-    queryKey: ['feed', creatorId ?? 'random', favoriteFolderId ?? 'all', search, order],
-    queryFn: () => api.feed({ creatorId, favoriteFolderId, search, order, limit: 40 }),
+    queryKey: ['feed', creatorId ?? 'random', favoriteFolderId ?? 'all', search, order, recentMode ?? 'all', searchPlayback],
+    queryFn: () => api.feed({ creatorId, favoriteFolderId, search, order, recentMode, limit: 40 }),
   });
 
   const handleOrderChange = (nextOrder: FeedOrder) => {
@@ -51,12 +55,16 @@ export function FeedPage() {
         <FeedViewer
           works={feed.data?.works ?? []}
           search={search}
-          onSearch={setSearch}
+          onSearch={(keyword) => {
+            const query = keyword.trim();
+            if (query) navigate(`/search?${new URLSearchParams({ q: query }).toString()}`);
+          }}
           enableFavorites
           initialWorkId={currentWorkId ?? initialWorkId}
           order={order}
           onOrderChange={handleOrderChange}
           onCurrentWorkChange={setCurrentWorkId}
+          isAdmin={isAdmin}
         />
       )}
     </div>

@@ -7,6 +7,12 @@ APP_BIN="$PKG_DIR/app/localbilibili"
 SUBTITLE_CLI_BIN="$PKG_DIR/app/subtitle-cli"
 SUBTITLE_RUNTIME_DIR="$PKG_DIR/app/subtitle-runtime"
 YTDLP_BIN="$PKG_DIR/app/yt-dlp"
+CODEX_BIN="$PKG_DIR/app/codex"
+CODEX_VERSION="rust-v0.144.4"
+CODEX_ARCHIVE_NAME="codex-x86_64-unknown-linux-musl.tar.gz"
+CODEX_ARCHIVE_URL="https://github.com/openai/codex/releases/download/${CODEX_VERSION}/${CODEX_ARCHIVE_NAME}"
+CODEX_ARCHIVE_SHA256="37c985be9d89e8c4f43b3aa0594c1213eac212d30ae2b95221f08fec807515d1"
+CODEX_CACHE_DIR="$ROOT_DIR/.tools/codex/${CODEX_VERSION}"
 DIST_DIR="$ROOT_DIR/dist"
 TOOLS_DIR="$ROOT_DIR/.tools/fnpack"
 YTDLP_TOOLS_DIR="$ROOT_DIR/.tools/yt-dlp"
@@ -122,6 +128,31 @@ prepare_ytdlp_runtime() {
   chmod +x "$YTDLP_BIN"
 }
 
+prepare_codex_runtime() {
+  local archive="$CODEX_CACHE_DIR/$CODEX_ARCHIVE_NAME"
+  local extracted="$CODEX_CACHE_DIR/codex-x86_64-unknown-linux-musl"
+  mkdir -p "$CODEX_CACHE_DIR"
+  if [ ! -s "$archive" ]; then
+    log "downloading pinned Codex $CODEX_VERSION"
+    curl -fL --retry 3 --retry-delay 2 "$CODEX_ARCHIVE_URL" -o "$archive"
+  fi
+  local actual
+  actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  if [ "$actual" != "$CODEX_ARCHIVE_SHA256" ]; then
+    echo "Codex checksum verification failed" >&2
+    exit 1
+  fi
+  rm -f "$extracted"
+  tar -xzf "$archive" -C "$CODEX_CACHE_DIR"
+  if [ ! -x "$extracted" ]; then
+    echo "Codex archive did not contain expected executable: $extracted" >&2
+    exit 1
+  fi
+  cp "$extracted" "$CODEX_BIN"
+  chmod +x "$CODEX_BIN"
+  printf '%s  %s\n' "$CODEX_ARCHIVE_SHA256" "$CODEX_ARCHIVE_NAME" > "$PKG_DIR/app/codex.sha256"
+}
+
 log "building embedded web assets"
 npm run build --prefix "$ROOT_DIR/web"
 
@@ -141,6 +172,9 @@ prepare_subtitle_runtime
 log "preparing yt-dlp runtime"
 prepare_ytdlp_runtime
 
+log "preparing Codex runtime"
+prepare_codex_runtime
+
 if command -v file >/dev/null 2>&1; then
   file "$APP_BIN"
   file "$APP_BIN" | grep -Eq 'ELF 64-bit.*x86-64|ELF 64-bit.*x86_64' || {
@@ -157,6 +191,11 @@ if command -v file >/dev/null 2>&1; then
     echo "bundled yt-dlp is not linux x86_64" >&2
     exit 1
   }
+  file "$CODEX_BIN"
+  file "$CODEX_BIN" | grep -Eq 'ELF 64-bit.*x86-64|ELF 64-bit.*x86_64' || {
+    echo "Codex binary is not linux x86_64" >&2
+    exit 1
+  }
 fi
 
 log "checking fpk template"
@@ -170,6 +209,8 @@ require_file "$PKG_DIR/wizard/install"
 require_file "$PKG_DIR/app/ui/config"
 require_file "$SUBTITLE_CLI_BIN"
 require_file "$YTDLP_BIN"
+require_file "$CODEX_BIN"
+require_file "$PKG_DIR/app/codex.sha256"
 require_file "$SUBTITLE_RUNTIME_DIR/whisper-cli"
 require_file "$SUBTITLE_RUNTIME_DIR/ffmpeg"
 require_file "$SUBTITLE_RUNTIME_DIR/models/ggml-small.bin"
